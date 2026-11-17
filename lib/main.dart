@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'screens/home_screen.dart';
+import 'services/ads.dart';
 import 'services/location_service.dart';
 import 'services/notification_service.dart';
 import 'services/settings_store.dart';
@@ -10,6 +11,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final notifications = NotificationService();
   await notifications.init();
+  await initAds();
   runApp(
     LastTrainApp(
       home: HomeScreen(
@@ -17,6 +19,7 @@ Future<void> main() async {
         settings: SettingsStore(),
         locate: deviceLocation,
         notifications: notifications,
+        adBanner: const AdBanner(),
       ),
     ),
   );

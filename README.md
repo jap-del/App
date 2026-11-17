@@ -8,6 +8,7 @@
 - 막차 시간과 남은 시간 표시
 - 출발 알림 예약 (5분 전부터 30분 전까지 선택)
 - Android 잠금화면 고정 알림
+- 홈 화면 아래 배너 광고 (AdMob, 지금은 테스트 광고)
 
 아직 실제 교통 데이터는 연결되지 않았습니다. 서버 주소를 넘기지 않으면 화면에 "예시 데이터"라고 표시되는 가짜 막차 시간이 나옵니다.
 
@@ -25,6 +26,15 @@ flutter run --dart-define=API_BASE_URL=https://example.com
 ```
 
 교통 API 키는 앱에 넣지 않고 서버에만 둡니다.
+
+## 광고
+
+지금은 Google의 테스트용 광고 ID가 들어 있어서 수익이 나지 않습니다. 출시 전에 [AdMob](https://admob.google.com)에서 앱과 배너 광고 단위를 만든 뒤 바꿉니다.
+
+- 앱 ID: `android/app/src/main/AndroidManifest.xml`의 `APPLICATION_ID`, `ios/Runner/Info.plist`의 `GADApplicationIdentifier`
+- 배너 광고 단위 ID: 빌드할 때 `--dart-define=AD_BANNER_ANDROID=...` 와 `--dart-define=AD_BANNER_IOS=...`
+
+개발 중에는 반드시 테스트 ID를 쓰세요. 실제 광고를 직접 누르면 AdMob 계정이 정지될 수 있습니다.
 
 ## 검사
 

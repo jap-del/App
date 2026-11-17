@@ -68,5 +68,8 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>현재 위치에서 집까지 가는 막차 시간을 계산하기 위해 위치를 사용합니다.</string>
+	<!-- AdMob 앱 ID. 테스트용이며 출시 전에 실제 앱 ID로 바꿔야 한다. -->
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-3940256099942544~1458002511</string>
 </dict>
 </plist>

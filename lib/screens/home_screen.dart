@@ -20,6 +20,7 @@ class HomeScreen extends StatefulWidget {
     required this.settings,
     required this.locate,
     this.notifications,
+    this.adBanner,
   });
 
   final TransitService transit;
@@ -28,6 +29,9 @@ class HomeScreen extends StatefulWidget {
 
   /// 테스트에서는 null로 두어 알림을 건너뛴다.
   final NotificationService? notifications;
+
+  /// 화면 아래에 붙는 광고. 테스트에서는 null로 두어 광고를 뺀다.
+  final Widget? adBanner;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -160,7 +164,14 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
         ],
       ),
-      body: SafeArea(child: _buildBody(context)),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(child: _buildBody(context)),
+            ?widget.adBanner,
+          ],
+        ),
+      ),
     );
   }
 
