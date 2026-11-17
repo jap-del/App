@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:last_train/legal/consent_store.dart';
 import 'package:last_train/main.dart';
 import 'package:last_train/screens/home_screen.dart';
 import 'package:last_train/services/settings_store.dart';
@@ -10,6 +11,8 @@ LastTrainApp buildApp() => LastTrainApp(
     transit: SampleTransitService(now: () => DateTime(2026, 11, 16, 22, 0)),
     settings: SettingsStore(),
     locate: () async => (lat: 37.5665, lng: 126.9780),
+    consent: ConsentStore(),
+    onWithdrawn: () {},
   ),
 );
 
