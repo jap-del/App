@@ -6,6 +6,7 @@
 import {
   TAGO_DAY_CODE,
   findLastRoute,
+  planPaths,
   normalizeStationName,
   parseSeoulBusTime,
   parseTagoSchedule,
@@ -203,13 +204,38 @@ async function lastRouteResponse(params, env, origin, log) {
     }
     throw e;
   }
-  const found = await findLastRoute(paths, day, data);
+  // 종류마다 같은 서버의 계산 진입점(Planner)에 맡겨 호출 한도를 따로 받는다.
+  const planKind = env.PLANNER
+    ? async (kind, kindPaths) => {
+      const res = await env.PLANNER.plan({ paths: kindPaths, at: now.toISOString(), origin, debug: Boolean(log) });
+      for (const line of res.trace ?? []) log?.(`[${KIND_LABEL[kind]}] ${line}`);
+      log?.(`[${KIND_LABEL[kind]}] 바깥 API 호출 ${res.subrequests}번`);
+      return res.plans;
+    }
+    : null;
+  log?.(planKind ? '종류별로 나눠 계산' : '한 번에 계산');
+  const found = await findLastRoute(paths, day, data, planKind);
   log?.(`바깥 API 호출 ${data.subrequests()}번`);
   if (found.status === 'ok') return json(toResponse(found.plan, day, found.later, found.kinds));
   if (found.status === 'missed') {
     return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed' }, 404);
   }
   return json({ error: '이 경로는 막차 시간을 계산하지 못했어요.', reason: 'unknown' }, 503);
+}
+
+const KIND_LABEL = { subway: '지하철', bus: '버스', mixed: '지하철+버스' };
+
+/**
+ * 한 종류의 경로들을 계산한다 (Planner 진입점이 부른다). 요청마다 호출 한도를 새로 받는다.
+ * paths에는 길찾기 결과의 경로만 들어 있고 이용자 좌표는 없다.
+ */
+export async function planKindPaths({ paths, at, origin, debug }, env) {
+  const day = serviceDay(new Date(at));
+  const data = createData(env, origin);
+  const trace = [];
+  if (debug) data.log = (line) => trace.push(line);
+  const plans = await planPaths(paths ?? [], day, data, data.log);
+  return { plans, trace, subrequests: data.subrequests() };
 }
 
 function inKorea(lat, lng) {
@@ -258,7 +284,11 @@ function createData(env, origin) {
     if (cacheSeconds > 0) init.cf = { cacheTtl: cacheSeconds, cacheEverything: true };
     const res = await fetch(upstream.toString(), init);
     const body = await res.text();
-    if (!res.ok) throw new UpstreamError(`status ${res.status}`, String(res.status));
+    if (!res.ok) {
+      // Cloudflare가 상대 서버에 닿지 못하면 "error code: 1016" 같은 본문을 준다. 원인을 찾을 수 있게 남긴다.
+      const hint = body.match(/error code:?\s*(\d+)/i);
+      throw new UpstreamError(`status ${res.status}${hint ? ` (error code ${hint[1]})` : ''}`, String(res.status));
+    }
     if (body.trimStart().startsWith('<')) throw new UpstreamError(xmlReason(body), 'xml');
     const data = JSON.parse(body);
     const err = odsayError(data);

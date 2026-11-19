@@ -1,7 +1,13 @@
 # 막차 알림 앱의 API 서버 (Cloudflare Workers)
 name = "last-train-api"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2026-10-01"
+
+# 막차 계산을 종류별로 나눠 같은 서버의 Planner 진입점에 맡긴다 (요청마다 바깥 API 호출 한도를 따로 받기 위해).
+[[services]]
+binding = "PLANNER"
+service = "last-train-api"
+entrypoint = "Planner"
 
 # 요청 로그에 이용자 위치(좌표)가 남지 않도록 로그 수집을 끈다.
 [observability]

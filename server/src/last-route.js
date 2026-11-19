@@ -415,6 +415,12 @@ async function prepareBus(sp, day, data, log) {
       const exact = await tryExact(pathArsId);
       if (exact) return exact;
     }
+    // 심야버스는 밤새 배차가 달라 기점 시각으로 추정하면 크게 틀린다. 정확한 시각이 없으면 쓰지 않는다.
+    const noEstimate = () => {
+      log(`버스 ${lane.busNo}: 심야버스는 정류장 시각이 없으면 추정하지 않음`);
+      return null;
+    };
+    if (isNightBus(lane) && !(seoul && !pathArsId)) return noEstimate();
     if (lane.busID == null) return null;
     const detail = await data.busLane(lane.busID);
     if (!detail) {
@@ -430,6 +436,7 @@ async function prepareBus(sp, day, data, log) {
         if (exact) return exact;
       }
     }
+    if (isNightBus(lane)) return noEstimate();
     const { stop, reason } = estimateBusStop(sp, detail, day.dayType);
     log(stop
       ? `버스 ${lane.busNo}: 기점 막차 ${detail.busLastTime}, 정류장 막차 추정 ${clock(stop.last)}`
@@ -597,71 +604,117 @@ export function pickLatest(plans, nowMin) {
   return { status: 'ok', plan, later };
 }
 
-/**
- * 지하철만, 버스만, 함께 타는 경로의 막차를 각각 구하고, 그중 가장 늦은 것도 고른다.
- * 반환: { status, plan, later, kinds: { subway, bus, mixed } }
- *   status: 'ok' | 'missed' (오늘 막차가 이미 지남) | 'unknown' (계산 못 함)
- *   kinds의 각 값도 같은 모양이고, 그 종류의 경로가 없으면 status 'none'.
- */
-export async function findLastRoute(paths, day, data) {
-  const groups = {
+/** 종류별로 살펴볼 경로 (길찾기 결과 순서대로, 종류마다 정한 수만큼). */
+export function groupPaths(paths) {
+  return {
     subway: paths.filter((p) => pathKind(p) === 'subway').slice(0, MAX_SUBWAY_PATHS),
     bus: paths.filter((p) => pathKind(p) === 'bus').slice(0, MAX_BUS_PATHS),
     mixed: paths.filter((p) => pathKind(p) === 'mixed').slice(0, MAX_MIXED_PATHS),
   };
-  const baseLog = data.log ?? noLog;
+}
+
+/**
+ * 호출 한도 하나로 세 종류를 모두 계산할 때의 순서. 종류마다 첫 경로(버스는 몇 개)를 먼저 보고
+ * 남은 경로를 번갈아 본다. 그래야 한도가 모자라도 세 종류 모두 답이 나온다.
+ */
+export function sharedOrder(groups) {
+  return [
+    ...groups.subway.slice(0, 1),
+    ...groups.mixed.slice(0, 1),
+    ...groups.bus.slice(0, FIRST_BUS_PATHS),
+    groups.subway[1],
+    groups.subway[2],
+    groups.mixed[1],
+    ...groups.bus.slice(FIRST_BUS_PATHS),
+  ].filter(Boolean);
+}
+
+/** 한도가 이만큼도 안 남으면 새 경로를 시작하지 않는다. */
+const MIN_CALLS_TO_START = 4;
+
+/**
+ * 경로들의 막차를 계산한다. 호출 한도 안에서 앞 경로부터 여러 개씩 한꺼번에 계산하고,
+ * 한 묶음이 끝날 때마다 실제로 남은 한도(캐시 덕분에 어림보다 많을 수 있다)를 다시 본다.
+ * 반환: 계산된 막차 목록 (각각 kind가 붙는다).
+ */
+export async function planPaths(paths, day, data, log = data.log ?? noLog) {
   let count = 0;
   const run = async (path) => {
     count += 1;
     const id = count;
-    const log = (line) => baseLog(`#${id} ${line}`);
+    const pathLog = (line) => log(`#${id} ${line}`);
     const summary = (path.subPath ?? [])
       .filter((s) => s.trafficType !== 3)
       .map((s) => (s.trafficType === 1 ? s.lane?.[0]?.name : `${s.lane?.[0]?.busNo}번`) ?? `종류${s.trafficType}`)
       .join(' > ');
-    log(`경로 [${summary}]`);
+    pathLog(`경로 [${summary}]`);
     try {
-      const plan = await planPath(path, day, data, log);
-      log(plan ? `→ ${clock(plan.departBy)}까지 출발${plan.night ? ' (심야버스)' : ''}` : '→ 계산 못 함');
+      const plan = await planPath(path, day, data, pathLog);
+      pathLog(plan ? `→ ${clock(plan.departBy)}까지 출발${plan.night ? ' (심야버스)' : ''}` : '→ 계산 못 함');
       return plan ? { ...plan, kind: pathKind(path) } : null;
     } catch (e) {
       // 한 경로의 데이터가 없어도 다른 경로는 계속 본다.
-      log(`→ 오류: ${e?.message ?? e}`);
+      pathLog(`→ 오류: ${e?.message ?? e}`);
       return null;
     }
   };
 
-  // 1차: 종류마다 첫 경로(버스는 몇 개)를 한꺼번에 계산해서, 세 종류 모두 답이 나오게 한다.
-  const first = [
-    ...groups.subway.slice(0, 1),
-    ...groups.mixed.slice(0, 1),
-    ...groups.bus.slice(0, FIRST_BUS_PATHS),
-  ];
-  const results = await Promise.all(first.map(run));
-
-  // 2차: 남은 경로는 호출 한도 안에서 종류를 번갈아 가며 본다.
-  const rest = [
-    groups.subway[1], groups.mixed[1], ...groups.bus.slice(FIRST_BUS_PATHS), groups.subway[2],
-  ].filter(Boolean);
-  let left = data.budgetLeft ? data.budgetLeft() : Infinity;
-  const second = [];
-  for (const path of rest) {
-    const cost = estimatedCalls(path);
-    if (cost > left) continue;
-    left -= cost;
-    second.push(path);
+  const queue = [...paths];
+  const plans = [];
+  while (queue.length) {
+    let left = data.budgetLeft ? data.budgetLeft() : Infinity;
+    const batch = [];
+    while (queue.length) {
+      const cost = estimatedCalls(queue[0]);
+      if (cost > left && !(batch.length === 0 && left >= MIN_CALLS_TO_START)) break;
+      left -= cost;
+      batch.push(queue.shift());
+    }
+    if (!batch.length) break;
+    plans.push(...(await Promise.all(batch.map(run))).filter(Boolean));
   }
-  if (second.length) results.push(...(await Promise.all(second.map(run))));
-  if (rest.length > second.length) baseLog(`경로 ${rest.length - second.length}개는 호출 한도 때문에 건너뜀`);
+  if (queue.length) log(`경로 ${queue.length}개는 호출 한도 때문에 건너뜀`);
+  return plans;
+}
 
-  const plans = results.filter(Boolean);
+/** 계산한 막차들을 종류별로, 그리고 전체에서 가장 늦은 것으로 고른다. */
+export function combinePlans(plans, groups, nowMin) {
   const kinds = {};
   for (const kind of ROUTE_KINDS) {
     kinds[kind] = groups[kind].length
-      ? pickLatest(plans.filter((p) => p.kind === kind), day.nowMin)
+      ? pickLatest(plans.filter((p) => p.kind === kind), nowMin)
       : { status: 'none' };
   }
-  return { ...pickLatest(plans, day.nowMin), kinds };
+  return { ...pickLatest(plans, nowMin), kinds };
+}
+
+/**
+ * 지하철만, 버스만, 함께 타는 경로의 막차를 각각 구하고, 그중 가장 늦은 것도 고른다.
+ * planKind를 주면 종류마다 따로 계산을 맡긴다 (서버에서는 종류마다 호출 한도를 따로 받는다).
+ * 맡긴 계산이 실패한 종류는 여기서 직접 계산한다.
+ * 반환: { status, plan, later, kinds: { subway, bus, mixed } }
+ *   status: 'ok' | 'missed' (오늘 막차가 이미 지남) | 'unknown' (계산 못 함)
+ *   kinds의 각 값도 같은 모양이고, 그 종류의 경로가 없으면 status 'none'.
+ */
+export async function findLastRoute(paths, day, data, planKind = null) {
+  const groups = groupPaths(paths);
+  const log = data.log ?? noLog;
+  const plans = [];
+  let local = groups;
+  if (planKind) {
+    local = { subway: [], bus: [], mixed: [] };
+    await Promise.all(ROUTE_KINDS.filter((kind) => groups[kind].length).map(async (kind) => {
+      try {
+        plans.push(...(await planKind(kind, groups[kind])));
+      } catch (e) {
+        log(`${kind} 경로를 나눠 계산하지 못해 직접 계산: ${e?.message ?? e}`);
+        local[kind] = groups[kind];
+      }
+    }));
+  }
+  const rest = sharedOrder(local);
+  if (rest.length) plans.push(...(await planPaths(rest, day, data, log)));
+  return combinePlans(plans, groups, day.nowMin);
 }
 
 /** 막차 하나(와 그 뒤 심야버스)를 앱으로 보낼 모양으로 바꾼다. */

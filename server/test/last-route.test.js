@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import worker, { clearMemoryCache } from '../src/index.js';
+import worker, { clearMemoryCache, planKindPaths } from '../src/index.js';
 import {
   busTripFromLane,
   clock,
@@ -21,6 +21,7 @@ import {
   serviceDay,
   legPath,
   estimatedCalls,
+  planPaths,
 } from '../src/last-route.js';
 
 /** 운행일 기준 분 → TAGO "HHMMSS". */
@@ -417,13 +418,39 @@ describe('경로 막차 계산', () => {
     const data = fakeData();
     const trace = [];
     data.log = (line) => trace.push(line);
-    data.budgetLeft = () => 5;
+    let used = 0;
+    const { findSubwayStation, subwaySchedule } = data;
+    data.findSubwayStation = (...a) => { used += 1; return findSubwayStation(...a); };
+    data.subwaySchedule = (...a) => { used += 1; return subwaySchedule(...a); };
+    data.budgetLeft = () => 12 - used;
     const path = { pathType: 1, subPath: [subwayLeg] };
     const found = await findLastRoute([path, path, path], weekdayEvening, data);
     assert.equal(found.kinds.subway.status, 'ok');
     assert.equal(trace.filter((l) => l.includes('경로 [')).length, 1);
     assert.ok(trace.some((l) => l.includes('2개는 호출 한도 때문에 건너뜀')));
     assert.equal(estimatedCalls({ subPath: [subwayLeg, { trafficType: 3 }, { trafficType: 2, lane: [{}, {}, {}] }] }), 11);
+  });
+
+  it('종류마다 계산을 따로 맡기고, 실패한 종류만 직접 계산한다', async () => {
+    const bus = {
+      pathType: 2,
+      subPath: [{ trafficType: 2, sectionTime: 10, stationCount: 5, startID: 0, startName: 'A', endName: 'B', lane: [{ busNo: '7', busID: 9 }] }],
+    };
+    const subway = { pathType: 1, subPath: [subwayLeg] };
+    const data = fakeData({ bus: { busFirstTime: '05:00', busLastTime: '22:00', station: [] } });
+    const asked = [];
+    const planKind = async (kind, paths) => {
+      asked.push([kind, paths.length]);
+      if (kind === 'bus') throw new Error('binding down');
+      return planPaths(paths, weekdayEvening, fakeData());
+    };
+    const found = await findLastRoute([bus, subway, subway], weekdayEvening, data, planKind);
+    assert.deepEqual(asked.sort(), [['bus', 1], ['subway', 2]]);
+    assert.equal(data.calls.bus, 1, '실패한 버스 종류는 여기서 계산한다');
+    assert.equal(found.kinds.subway.status, 'ok');
+    assert.equal(found.kinds.bus.status, 'ok');
+    assert.equal(found.kinds.mixed.status, 'none');
+    assert.equal(found.plan.kind, 'subway');
   });
 
   it('지도에 그릴 역·정류장 좌표를 구간마다 준다', () => {
@@ -490,6 +517,16 @@ describe('심야버스', () => {
     assert.deepEqual(body.nightBus.buses, ['N75']);
     assert.match(body.nightBus.legs[1].description, /^N75번 심야버스 서울역버스환승센터 04:10 막차/);
     assert.equal(body.night, false);
+  });
+
+  it('심야버스는 정류장 시각이 없으면 추정하지 않는다', async () => {
+    const d = fakeData({ bus: { busFirstTime: '23:30', busLastTime: '04:10', station: [{ stationID: 1 }] } });
+    d.seoulBusTime = async () => null;
+    const trace = [];
+    const plan = await planPath(busPath('N75', 'RN75'), weekdayEvening, d, (l) => trace.push(l));
+    assert.equal(plan, null);
+    assert.equal(d.calls.bus, 0, 'ODsay 노선 조회도 하지 않는다');
+    assert.ok(trace.some((l) => l.includes('심야버스는 정류장 시각이 없으면 추정하지 않음')));
   });
 
   it('일반 막차가 끊기면 심야버스를 보여준다', async () => {
@@ -581,6 +618,55 @@ describe('/last-route', () => {
     assert.deepEqual(body.options.map((o) => o.status), ['ok', 'none', 'none']);
     assert.deepEqual(body.options[0].legs[1].path, [[37.501, 127.001], [37.502, 127.002], [37.503, 127.003]]);
     assert.equal(body.legs[0].path, undefined, '걷는 구간은 앱이 앞뒤 좌표로 그린다');
+  });
+
+  it('PLANNER 연결이 있으면 종류별로 나눠 계산을 맡긴다', async () => {
+    stub({ result: { path: [{ pathType: 1, subPath: [{ trafficType: 3, sectionTime: 5 }, subwayLeg] }] } });
+    const asked = [];
+    const PLANNER = {
+      async plan(input) {
+        asked.push(structuredClone(input));
+        return planKindPaths(input, env);
+      },
+    };
+    const res = await worker.fetch(
+      new Request(`https://api.example.com/last-route?${coords}&at=2026-11-19T18:00:00%2B09:00&debug=1`),
+      { ...env, PLANNER },
+    );
+    const body = await res.json();
+    assert.equal(body.status, 200);
+    assert.equal(body.body.departBy, '2026-11-19T15:54:00.000Z');
+    assert.deepEqual(body.body.options.map((o) => o.status), ['ok', 'none', 'none']);
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].paths.length, 1);
+    assert.equal(asked[0].origin, 'https://api.example.com');
+    assert.ok(!JSON.stringify(asked).includes('126.97'), '이용자 좌표는 넘기지 않는다');
+    assert.ok(body.trace.includes('종류별로 나눠 계산'));
+    assert.ok(body.trace.some((l) => l.startsWith('[지하철] #1 경로')));
+    assert.ok(body.trace.some((l) => /^\[지하철\] 바깥 API 호출 \d+번$/.test(l)));
+  });
+
+  it('PLANNER 연결이 실패하면 직접 계산한다', async () => {
+    stub({ result: { path: [{ pathType: 1, subPath: [subwayLeg] }] } });
+    const PLANNER = { plan: async () => { throw new Error('binding down'); } };
+    const res = await worker.fetch(
+      new Request(`https://api.example.com/last-route?${coords}&at=2026-11-19T18:00:00%2B09:00`),
+      { ...env, PLANNER },
+    );
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).kind, 'subway');
+  });
+
+  it('상대 서버에 닿지 못한 오류는 원인 번호를 남긴다', async () => {
+    seoulBus = null;
+    globalThis.fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'api.odsay.com') return new Response(JSON.stringify({ result: { path: [busPath] } }));
+      if (url.hostname === 'ws.bus.go.kr') return new Response('error code: 1016', { status: 530 });
+      return new Response(JSON.stringify({ result: {} }));
+    };
+    const body = await (await call(`${coords}&at=2026-11-19T18:00:00%2B09:00&debug=1`)).json();
+    assert.ok(body.trace.some((l) => l.includes('status 530 (error code 1016)')));
   });
 
   it('debug=1이면 계산 과정과 함께 항상 200으로 답한다', async () => {
