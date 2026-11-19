@@ -176,19 +176,25 @@ export function matchTrips(startRuns, endRuns, endId, sectionTime) {
   const trips = [];
   const lo = Math.max(0, sectionTime * 0.6 - 2);
   const hi = sectionTime * 1.4 + 3;
+  // 앞선 열차가 이미 짝지은 도착 기록은 다시 쓰지 않는다 (급행이 끼어 있을 때 엉뚱한 짝을 막는다).
+  const claimed = new Set();
   for (const s of startRuns) {
     if (s.end === endId) {
       trips.push({ dep: s.dep, arr: s.dep + sectionTime, endName: s.endName });
       continue;
     }
-    let best = null;
-    for (const e of endRuns) {
-      if (e.end !== s.end) continue;
+    let best = -1;
+    for (let j = 0; j < endRuns.length; j += 1) {
+      const e = endRuns[j];
+      if (claimed.has(j) || e.end !== s.end) continue;
       const d = e.arr - s.dep;
       if (d < lo || d > hi) continue;
-      if (!best || Math.abs(d - sectionTime) < Math.abs(best.arr - s.dep - sectionTime)) best = e;
+      if (best < 0 || Math.abs(d - sectionTime) < Math.abs(endRuns[best].arr - s.dep - sectionTime)) best = j;
     }
-    if (best) trips.push({ dep: s.dep, arr: best.arr, endName: s.endName });
+    if (best >= 0) {
+      claimed.add(best);
+      trips.push({ dep: s.dep, arr: endRuns[best].arr, endName: s.endName });
+    }
   }
   return trips;
 }
@@ -250,31 +256,100 @@ function subwayTripFrom(prepared, deadline) {
   return trip ? { ...trip, estimated: false } : null;
 }
 
+/** 추정한 버스 막차 시각에서 빼는 여유(분). 추정이 늦으면 막차를 놓치므로 일찍 잡는다. */
+export const BUS_SAFETY_MIN = 5;
+/** 배차 간격을 모를 때 쓰는 값(분). */
+const DEFAULT_BUS_INTERVAL = 15;
+
 /**
- * 버스는 정류장별 시간표가 없어서, 노선의 기점 막차 시각에 기점부터 우리 정류장까지
- * 가는 시간을 더해 추정한다. 늦게 잡으면 막차를 놓치므로 버스가 빠르게(밤 기준
- * 시속 25km 이상) 달린다고 보고 짧게 잡는다. 다음 구간 때문에 막차보다 일찍 타야 하면
- * 배차 간격만큼 기다릴 수 있다고 보고 그만큼 일찍 정류장에 가도록 한다.
+ * 서울 버스의 "정류소별 첫차/막차" 시각("HH:MM", "HHMMSS", "20261119233000" 등)을
+ * 운행일 기준 분으로.
  */
-export function busTripFromLane(sp, detail, deadline, dayType = 'weekday') {
-  const last = parseClock(detail?.busLastTime);
-  if (last == null) return null;
-  const first = parseClock(detail?.busFirstTime) ?? 0;
-  const section = sp.sectionTime ?? 0;
-  const offset = busOffset(sp, detail);
-  const lastPass = last + offset;
-  if (lastPass + section <= deadline) {
-    return { dep: lastPass, arr: lastPass + section, isLast: true, estimated: true };
+export function parseSeoulBusTime(text) {
+  const digits = String(text ?? '').replace(/\D/g, '');
+  let hh;
+  let mm;
+  if (digits.length >= 12) {
+    hh = digits.slice(8, 10);
+    mm = digits.slice(10, 12);
+  } else if (digits.length === 4 || digits.length === 6) {
+    hh = digits.slice(0, 2);
+    mm = digits.slice(2, 4);
+  } else if (digits.length === 3) {
+    hh = digits.slice(0, 1);
+    mm = digits.slice(1, 3);
+  } else {
+    return null;
   }
-  const intervalText = {
-    weekday: detail.bus_Interval_Week,
-    saturday: detail.bus_Interval_Sat,
-    holiday: detail.bus_Interval_Sun,
-  }[dayType] ?? detail.busInterval;
-  const interval = Math.min(Math.max(parseInt(intervalText ?? detail.busInterval, 10) || 20, 3), 30);
+  let h = Number(hh);
+  const m = Number(mm);
+  if (!(h >= 0 && h <= 29 && m >= 0 && m < 60)) return null;
+  if (h < DAY_START_HOUR) h += 24;
+  return h * 60 + m;
+}
+
+function busInterval(detail, dayType) {
+  const text = {
+    weekday: detail?.bus_Interval_Week,
+    saturday: detail?.bus_Interval_Sat,
+    holiday: detail?.bus_Interval_Sun,
+  }[dayType] ?? detail?.busInterval;
+  return Math.min(Math.max(parseInt(text, 10) || DEFAULT_BUS_INTERVAL, 3), 30);
+}
+
+/**
+ * 우리 정류장의 첫차·막차 시각으로 버스 구간을 계산한다.
+ * 막차를 타면 되면 막차를, 다음 구간 때문에 더 일찍 타야 하면
+ * 배차 간격만큼 기다릴 수 있다고 보고 그만큼 일찍 정류장에 가게 한다.
+ */
+export function busTripAtStop({ first, last, interval, estimated }, section, deadline) {
+  if (last + section <= deadline) {
+    return { dep: last, arr: last + section, isLast: true, estimated };
+  }
   const dep = deadline - section - interval;
-  if (dep < first + offset) return null;
-  return { dep, arr: deadline, isLast: false, estimated: true };
+  if (dep < first) return null;
+  return { dep, arr: deadline, isLast: false, estimated };
+}
+
+/** ODsay 노선 정보에서 우리 정류장 위치. 회차 지점을 지난 정류장이면 returning이 true. */
+export function busStopPosition(sp, detail) {
+  const stops = detail?.station ?? [];
+  const idx = stops.findIndex((st) => String(st.stationID) === String(sp.startID));
+  if (idx < 0) return { idx, returning: false };
+  const stop = stops[idx];
+  const turn = Number(detail.turningPointIdx);
+  const returning = Number(stop.stationDirection) === 2 ||
+    (Number.isFinite(turn) && turn > 0 && Number(stop.idx ?? idx) > turn);
+  return { idx, returning };
+}
+
+/**
+ * 정류장별 시간표가 없는 버스는 노선의 기점 막차 시각에 기점부터 우리 정류장까지
+ * 가는 시간을 더해 추정한다. 늦게 잡으면 막차를 놓치므로 버스가 빠르게(밤 기준
+ * 시속 25km 이상) 달린다고 보고 짧게 잡고, 여유 시간을 더 뺀다.
+ * 회차 지점을 지난 정류장은 막차가 거기까지 오는지 알 수 없어서 추정하지 않는다.
+ */
+export function estimateBusStop(sp, detail, dayType = 'weekday') {
+  const last = parseClock(detail?.busLastTime);
+  if (last == null) return { reason: '노선 막차 시각 없음' };
+  const { returning } = busStopPosition(sp, detail);
+  if (returning) return { reason: '회차 지점 뒤 정류장이라 추정하지 않음' };
+  const first = parseClock(detail?.busFirstTime) ?? 0;
+  const offset = busOffset(sp, detail);
+  return {
+    stop: {
+      first: first + offset,
+      last: last + offset - BUS_SAFETY_MIN,
+      interval: busInterval(detail, dayType),
+      estimated: true,
+    },
+  };
+}
+
+/** 예전 이름 호환: 추정으로 버스 구간을 계산한다. */
+export function busTripFromLane(sp, detail, deadline, dayType = 'weekday') {
+  const { stop } = estimateBusStop(sp, detail, dayType);
+  return stop ? busTripAtStop(stop, sp.sectionTime ?? 0, deadline) : null;
 }
 
 const MIN_BUS_SPEED_M_PER_MIN = 25000 / 60;
@@ -293,24 +368,41 @@ export function busOffset(sp, detail) {
   return idx * perStop * BUS_OFFSET_FACTOR;
 }
 
-/** 버스 구간의 노선 정보(최대 두 노선)를 불러온다. */
-async function prepareBus(sp, data, log) {
-  const lanes = (sp.lane ?? []).filter((l) => l.busID != null).slice(0, 2);
-  const details = await Promise.all(lanes.map((l) => data.busLane(l.busID)));
-  const options = [];
-  lanes.forEach((lane, i) => {
-    const detail = details[i];
-    if (detail) options.push({ lane, detail });
-    else log(`버스 ${lane.busNo}: 노선 정보 없음 (조회 한도 또는 오류)`);
-  });
-  return options;
+/**
+ * 버스 구간의 정류장 첫차·막차를 준비한다 (최대 두 노선).
+ * 서울 버스는 서울시 정류소별 막차 시각(정확)을 먼저 쓰고, 없을 때만 ODsay 노선 정보로 추정한다.
+ * ODsay는 무료 호출 수가 적어서 서울 시각이 있으면 부르지 않는다.
+ */
+async function prepareBus(sp, day, data, log) {
+  const lanes = (sp.lane ?? []).filter((l) => l.busID != null || l.busLocalBlID).slice(0, 2);
+  const arsId = String(sp.startArsID ?? '').replace(/\D/g, '');
+  const options = await Promise.all(lanes.map(async (lane) => {
+    if (arsId && lane.busLocalBlID && Number(lane.busCityCode) === 1000 && data.seoulBusTime) {
+      const exact = await data.seoulBusTime(arsId, String(lane.busLocalBlID));
+      if (exact) {
+        log(`버스 ${lane.busNo}: 서울 정류소 막차 ${clock(exact.last)} (정확)`);
+        return { lane, stop: { ...exact, interval: DEFAULT_BUS_INTERVAL, estimated: false } };
+      }
+    }
+    if (lane.busID == null) return null;
+    const detail = await data.busLane(lane.busID);
+    if (!detail) {
+      log(`버스 ${lane.busNo}: 노선 정보 없음 (조회 한도 또는 오류)`);
+      return null;
+    }
+    const { stop, reason } = estimateBusStop(sp, detail, day.dayType);
+    log(stop
+      ? `버스 ${lane.busNo}: 기점 막차 ${detail.busLastTime}, 정류장 막차 추정 ${clock(stop.last)}`
+      : `버스 ${lane.busNo}: ${reason}`);
+    return stop ? { lane, stop } : null;
+  }));
+  return options.filter(Boolean);
 }
 
-function busTripFrom(sp, options, deadline, day, log) {
+function busTripFrom(sp, options, deadline) {
   let best = null;
-  for (const { lane, detail } of options ?? []) {
-    const trip = busTripFromLane(sp, detail, deadline, day.dayType);
-    log(`버스 ${lane.busNo}: 기점 막차 ${detail.busLastTime}, 추정 ${trip ? `${clock(trip.dep)}${trip.isLast ? ' 막차' : ''}` : '탈 수 없음'}`);
+  for (const { lane, stop } of options ?? []) {
+    const trip = busTripAtStop(stop, sp.sectionTime ?? 0, deadline);
     if (trip && (!best || trip.dep > best.dep)) best = { ...trip, busNo: lane.busNo };
   }
   return best;
@@ -325,7 +417,7 @@ export async function planPath(path, day, data, log = data.log ?? noLog) {
   if (!subs.length || subs.some((s) => ![1, 2, 3].includes(s.trafficType))) return null;
   const prepared = await Promise.all(subs.map((sp) => {
     if (sp.trafficType === 1) return prepareSubway(sp, day, data, log);
-    if (sp.trafficType === 2) return prepareBus(sp, data, log);
+    if (sp.trafficType === 2) return prepareBus(sp, day, data, log);
     return null;
   }));
   const trips = new Array(subs.length);
@@ -339,7 +431,7 @@ export async function planPath(path, day, data, log = data.log ?? noLog) {
     const mode = sp.trafficType === 1 ? 'subway' : 'bus';
     const trip = mode === 'subway'
       ? subwayTripFrom(prepared[i], deadline)
-      : busTripFrom(sp, prepared[i], deadline, day, log);
+      : busTripFrom(sp, prepared[i], deadline);
     if (!trip) return null;
     trips[i] = trip;
     deadline = trip.dep - BOARD_BUFFER[mode];
@@ -393,9 +485,10 @@ function describeLegs(subs, trips) {
       });
     } else {
       const bus = `${t.busNo ?? sp.lane?.[0]?.busNo ?? ''}번 버스`;
+      const note = t.estimated ? ' (추정)' : '';
       const when = t.isLast
-        ? `${clock(t.dep)}쯤 막차 (추정)`
-        : `${clock(t.dep)}까지 정류장 도착 (추정)`;
+        ? `${clock(t.dep)}${t.estimated ? '쯤' : ''} 막차${note}`
+        : `${clock(t.dep)}까지 정류장 도착${note}`;
       legs.push({
         mode: 'bus',
         description: `${bus} ${sp.startName} ${when} → ${sp.endName}`,
@@ -405,7 +498,7 @@ function describeLegs(subs, trips) {
         departMin: t.dep,
         arriveMin: t.arr,
         isLast: t.isLast,
-        estimated: true,
+        estimated: t.estimated,
       });
     }
   });

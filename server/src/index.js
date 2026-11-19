@@ -7,6 +7,7 @@ import {
   TAGO_DAY_CODE,
   findLastRoute,
   normalizeStationName,
+  parseSeoulBusTime,
   parseTagoSchedule,
   pickStation,
   serviceDay,
@@ -17,6 +18,7 @@ import {
 const TAGO_BASE = 'https://apis.data.go.kr/1613000';
 const SEOUL_BASE = 'http://swopenapi.seoul.go.kr/api/subway';
 const ODSAY_BASE = 'https://api.odsay.com/v1/api';
+const SEOUL_BUS_BASE = 'http://ws.bus.go.kr/api/rest';
 
 /**
  * 앱이 부를 수 있는 ODsay API와 캐시 시간(초).
@@ -301,6 +303,41 @@ function createData(env, origin) {
           numOfRows: 500,
           pageNo: 1,
         }, ttl))));
+    },
+
+    /**
+     * 서울 버스의 우리 정류장 첫차·막차 (공공데이터포털 "서울특별시_정류소정보조회 서비스").
+     * 활용신청 전이거나 서울 노선이 아니면 null. 오류는 캐시에 오래 남기지 않는다.
+     */
+    async seoulBusTime(arsId, routeId) {
+      const key = `seoulbus:${arsId}:${routeId}`;
+      const hit = memory.get(key);
+      if (hit && hit.expires > Date.now()) return hit.value;
+      let value = null;
+      try {
+        const upstream = new URL(`${SEOUL_BUS_BASE}/stationinfo/getBustimeByStation`);
+        upstream.searchParams.set('arsId', arsId);
+        upstream.searchParams.set('busRouteId', routeId);
+        upstream.searchParams.set('resultType', 'json');
+        upstream.searchParams.set('serviceKey', env.DATA_GO_KR_KEY);
+        const data = await getJson(upstream, 0);
+        const result = data?.ServiceResult;
+        const code = String(result?.msgHeader?.headerCd ?? '0');
+        if (code !== '0') {
+          this.log?.(`서울 버스 정류소 시각: ${result?.msgHeader?.headerMsg ?? code}`);
+        } else {
+          const list = result?.msgBody?.itemList;
+          const items = Array.isArray(list) ? list : list ? [list] : [];
+          const item = items.find((i) => String(i.busRouteId) === routeId) ?? (items.length === 1 ? items[0] : null);
+          const last = parseSeoulBusTime(item?.lastBusTm);
+          if (last != null) value = { first: parseSeoulBusTime(item.firstBusTm) ?? 0, last };
+        }
+      } catch (e) {
+        this.log?.(`서울 버스 정류소 시각 오류: ${e?.message ?? e}`);
+      }
+      const ttl = value ? 6 * 60 * 60 : 10 * 60;
+      memory.set(key, { value, expires: Date.now() + ttl * 1000 });
+      return value;
     },
 
     busLane(busID) {

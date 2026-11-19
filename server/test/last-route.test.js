@@ -4,6 +4,8 @@ import worker, { clearMemoryCache } from '../src/index.js';
 import {
   busTripFromLane,
   clock,
+  estimateBusStop,
+  parseSeoulBusTime,
   directionScore,
   findLastRoute,
   latestTrip,
@@ -173,6 +175,20 @@ describe('지하철 방향과 열차 짝짓기', () => {
     assert.equal(last.isLast, true);
   });
 
+  it('급행이 끼어 있어도 이미 짝지은 도착 기록은 다시 쓰지 않는다', () => {
+    // 급행 A: 00:45 출발 → 00:51 도착, 완행 B: 00:48 출발 → 00:57 도착. 길찾기 예상 6분.
+    const start = [
+      { dep: 24 * 60 + 45, arr: 24 * 60 + 45, end: 'T', endName: 'T' },
+      { dep: 24 * 60 + 48, arr: 24 * 60 + 48, end: 'T', endName: 'T' },
+    ];
+    const end = [
+      { dep: 24 * 60 + 51, arr: 24 * 60 + 51, end: 'T' },
+      { dep: 24 * 60 + 57, arr: 24 * 60 + 57, end: 'T' },
+    ];
+    const trips = matchTrips(start, end, 'X', 6);
+    assert.deepEqual(trips.map((t) => [clock(t.dep), clock(t.arr)]), [['00:45', '00:51'], ['00:48', '00:57']]);
+  });
+
   it('다음 구간 시각에 맞춰 더 이른 열차를 고른다', () => {
     const trips = matchTrips(runs('S2', 'D'), runs('S4', 'D'), 'S4', 4);
     const trip = latestTrip(trips, 23 * 60 + 30);
@@ -191,11 +207,11 @@ describe('버스 막차 추정', () => {
   };
 
   it('거리 정보가 없으면 정류장 수로 짧게 잡아 더한다', () => {
-    // 정류장 3번째(인덱스 3), 정류장당 2분, 보정 0.8 → 4.8분
+    // 정류장 3번째(인덱스 3), 정류장당 2분, 보정 0.8 → 4.8분, 여유 5분을 뺀다
     const trip = busTripFromLane(sp, detail, Infinity);
     assert.equal(trip.isLast, true);
     assert.equal(trip.estimated, true);
-    assert.equal(Math.round(trip.dep * 10) / 10, 22 * 60 + 40 + 4.8);
+    assert.equal(Math.round(trip.dep * 10) / 10, 22 * 60 + 40 + 4.8 - 5);
   });
 
   it('기점부터 거리로 추정하고, 밤 버스는 시속 25km 이상으로 본다', () => {
@@ -209,7 +225,7 @@ describe('버스 막차 추정', () => {
     };
     const leg = { trafficType: 2, sectionTime: 34, distance: 9000, stationCount: 15, startID: 166790 };
     const trip = busTripFromLane(leg, lane, Infinity);
-    assert.equal(clock(trip.dep), '01:11');
+    assert.equal(clock(trip.dep), '01:06'); // 00:05 + 66.5분 - 여유 5분
     // 다음 구간 때문에 일찍 타야 하면 요일별 배차 간격을 쓴다.
     const sunday = busTripFromLane(leg, lane, 24 * 60, 'holiday');
     assert.equal(sunday.dep, 24 * 60 - 34 - 13);
@@ -219,6 +235,28 @@ describe('버스 막차 추정', () => {
     const trip = busTripFromLane(sp, detail, 22 * 60);
     assert.equal(trip.isLast, false);
     assert.equal(trip.dep, 22 * 60 - 20 - 10);
+  });
+
+  it('회차 지점을 지난 정류장은 추정하지 않는다', () => {
+    const lane = {
+      busLastTime: '24:05',
+      turningPointIdx: 55,
+      station: [
+        { idx: 0, stationID: 127479, stationDistance: 0, stationDirection: 1 },
+        { idx: 58, stationID: 166790, stationDistance: 27715, stationDirection: 2 },
+      ],
+    };
+    const leg = { trafficType: 2, sectionTime: 34, startID: 166790 };
+    assert.equal(busTripFromLane(leg, lane, Infinity), null);
+    assert.match(estimateBusStop(leg, lane).reason, /회차/);
+  });
+
+  it('서울 정류소 막차 시각의 여러 형식을 읽는다', () => {
+    assert.equal(parseSeoulBusTime('20261119233000'), 23 * 60 + 30);
+    assert.equal(parseSeoulBusTime('20261120004500'), 24 * 60 + 45);
+    assert.equal(parseSeoulBusTime('23:30'), 23 * 60 + 30);
+    assert.equal(parseSeoulBusTime('003000'), 24 * 60 + 30);
+    assert.equal(parseSeoulBusTime(''), null);
   });
 
   it('막차 시간이 없으면 계산하지 않는다', () => {
@@ -259,7 +297,44 @@ describe('경로 막차 계산', () => {
     assert.ok(subway.arriveMin <= 23 * 60 + 26);
     assert.ok(subway.arriveMin > 23 * 60 + 10);
     assert.equal(plan.estimated, true);
-    assert.match(plan.legs.at(-1).description, /7번 버스 A 23:30쯤 막차 \(추정\) → B/);
+    assert.match(plan.legs.at(-1).description, /7번 버스 A 23:25쯤 막차 \(추정\) → B/);
+  });
+
+  it('서울 버스는 정류소 막차 시각을 쓰고 ODsay를 부르지 않는다', async () => {
+    const path = {
+      pathType: 2,
+      subPath: [{
+        trafficType: 2, sectionTime: 30, stationCount: 10, startID: 166790, startArsID: '02-005',
+        startName: '서울역버스환승센터', endName: '강남역', lane: [{ busNo: '402', busID: 1050, busLocalBlID: '100100063', busCityCode: 1000 }],
+      }],
+    };
+    const data = fakeData();
+    const asked = [];
+    data.seoulBusTime = async (arsId, routeId) => {
+      asked.push([arsId, routeId]);
+      return { first: 4 * 60 + 30, last: 24 * 60 + 10 };
+    };
+    const plan = await planPath(path, weekdayEvening, data);
+    assert.deepEqual(asked, [['02005', '100100063']]);
+    assert.equal(data.calls.bus, 0);
+    assert.equal(plan.estimated, false);
+    assert.equal(clock(plan.departBy), '00:09');
+    assert.match(plan.legs[0].description, /^402번 버스 서울역버스환승센터 00:10 막차 → 강남역$/);
+  });
+
+  it('서울 시각이 없으면 ODsay 노선 정보로 추정한다', async () => {
+    const path = {
+      pathType: 2,
+      subPath: [{
+        trafficType: 2, sectionTime: 10, stationCount: 5, startID: 0, startArsID: '02005',
+        startName: 'A', endName: 'B', lane: [{ busNo: '7', busID: 9, busLocalBlID: '100100001', busCityCode: 1000 }],
+      }],
+    };
+    const data = fakeData({ bus: { busFirstTime: '05:00', busLastTime: '23:30', station: [{ stationID: 0 }] } });
+    data.seoulBusTime = async () => null;
+    const plan = await planPath(path, weekdayEvening, data);
+    assert.equal(data.calls.bus, 1);
+    assert.equal(plan.estimated, true);
   });
 
   it('여러 경로 중 가장 늦게 출발해도 되는 경로를 고른다', async () => {
@@ -304,11 +379,14 @@ describe('/last-route', () => {
   beforeEach(() => {
     clearMemoryCache();
     calls = [];
+    seoulBus = null;
   });
 
   afterEach(() => {
     globalThis.fetch = realFetch;
   });
+
+  let seoulBus = null;
 
   function stub(odsayResult) {
     globalThis.fetch = async (input, init) => {
@@ -316,7 +394,10 @@ describe('/last-route', () => {
       calls.push({ url, init });
       let body;
       if (url.hostname === 'api.odsay.com') {
-        body = odsayResult;
+        body = typeof odsayResult === 'function' ? odsayResult(url) : odsayResult;
+      } else if (url.hostname === 'ws.bus.go.kr') {
+        if (seoulBus == null) return new Response('<OpenAPI_ServiceResponse><cmmMsgHeader><returnAuthMsg>SERVICE_KEY_IS_NOT_REGISTERED_ERROR</returnAuthMsg></cmmMsgHeader></OpenAPI_ServiceResponse>');
+        body = seoulBus;
       } else if (url.pathname.endsWith('GetKwrdFndSubwaySttnList')) {
         const name = url.searchParams.get('subwayStationName');
         body = tagoResponse(STATIONS.includes(name)
@@ -365,6 +446,50 @@ describe('/last-route', () => {
     assert.ok(body.trace.some((line) => line.startsWith('#1 경로 [수도권 9호선]')));
     assert.ok(body.trace.some((line) => line.includes('방향 점수')));
     assert.ok(!JSON.stringify(body).includes('37.55'), '좌표는 기록에 넣지 않는다');
+  });
+
+  const busPath = {
+    pathType: 2,
+    subPath: [
+      { trafficType: 3, sectionTime: 3 },
+      {
+        trafficType: 2, sectionTime: 34, distance: 9000, stationCount: 15, startID: 166790, startArsID: '02-005',
+        startName: '서울역버스환승센터', endName: '신분당선강남역',
+        lane: [{ busNo: '402', busID: 1050, busLocalBlID: '100100063', busCityCode: 1000 }],
+      },
+    ],
+  };
+
+  it('서울 버스는 정류소 막차 시각으로 정확히 계산한다', async () => {
+    seoulBus = {
+      ServiceResult: {
+        msgHeader: { headerCd: '0' },
+        msgBody: { itemList: [{ busRouteId: '100100063', firstBusTm: '20261119040000', lastBusTm: '20261120001000' }] },
+      },
+    };
+    stub((url) => (url.pathname.endsWith('busLaneDetail') ? assert.fail('ODsay 노선 조회를 하면 안 된다') : { result: { path: [busPath] } }));
+    const res = await call(`${coords}&at=2026-11-19T18:00:00%2B09:00`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.estimated, false);
+    assert.equal(body.departBy, '2026-11-19T15:06:00.000Z'); // 00:10 - 1 - 3 = 00:06 KST
+    const seoul = calls.find((c) => c.url.hostname === 'ws.bus.go.kr').url;
+    assert.equal(seoul.searchParams.get('arsId'), '02005');
+    assert.equal(seoul.searchParams.get('busRouteId'), '100100063');
+  });
+
+  it('서울 API를 아직 못 쓰면 ODsay 추정으로 넘어가고, 회차 뒤 정류장은 빼서 계산 못 함', async () => {
+    const detail = {
+      busLastTime: '24:05',
+      turningPointIdx: 55,
+      station: [{ idx: 58, stationID: 166790, stationDistance: 27715, stationDirection: 2 }],
+    };
+    stub((url) => (url.pathname.endsWith('busLaneDetail') ? { result: detail } : { result: { path: [busPath] } }));
+    const res = await call(`${coords}&at=2026-11-19T18:00:00%2B09:00&debug=1`);
+    const body = await res.json();
+    assert.equal(body.status, 503);
+    assert.ok(body.trace.some((l) => l.includes('SERVICE_KEY_IS_NOT_REGISTERED_ERROR')));
+    assert.ok(body.trace.some((l) => l.includes('회차 지점 뒤')));
   });
 
   it('좌표가 없거나 한국 밖이면 400', async () => {
