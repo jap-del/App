@@ -322,6 +322,28 @@ describe('경로 막차 계산', () => {
     assert.match(plan.legs[0].description, /^402번 버스 서울역버스환승센터 00:10 막차 → 강남역$/);
   });
 
+  it('길찾기에 정류소 번호가 없으면 노선 정보의 정류소 번호로 서울 시각을 찾는다', async () => {
+    const path = {
+      pathType: 2,
+      subPath: [{
+        trafficType: 2, sectionTime: 30, startID: 166790, startName: '서울역버스환승센터', endName: '강남역',
+        lane: [{ busNo: '402', busID: 1050, busLocalBlID: '100100063', busCityCode: 1000 }],
+      }],
+    };
+    const data = fakeData({
+      bus: { busLastTime: '24:05', turningPointIdx: 55, station: [{ idx: 58, stationID: 166790, arsID: '02005', stationDirection: 2 }] },
+    });
+    const asked = [];
+    data.seoulBusTime = async (arsId) => {
+      asked.push(arsId);
+      return { first: 4 * 60, last: 24 * 60 + 10 };
+    };
+    const plan = await planPath(path, weekdayEvening, data);
+    assert.deepEqual(asked, ['02005']);
+    assert.equal(plan.estimated, false);
+    assert.equal(clock(plan.departBy), '00:09');
+  });
+
   it('서울 시각이 없으면 ODsay 노선 정보로 추정한다', async () => {
     const path = {
       pathType: 2,

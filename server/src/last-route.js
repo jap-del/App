@@ -375,20 +375,37 @@ export function busOffset(sp, detail) {
  */
 async function prepareBus(sp, day, data, log) {
   const lanes = (sp.lane ?? []).filter((l) => l.busID != null || l.busLocalBlID).slice(0, 2);
-  const arsId = String(sp.startArsID ?? '').replace(/\D/g, '');
+  const digits = (v) => String(v ?? '').replace(/\D/g, '');
+  const pathArsId = digits(sp.startArsID ?? sp.passStopList?.stations?.[0]?.arsID);
   const options = await Promise.all(lanes.map(async (lane) => {
-    if (arsId && lane.busLocalBlID && Number(lane.busCityCode) === 1000 && data.seoulBusTime) {
+    const seoul = lane.busLocalBlID && Number(lane.busCityCode) === 1000 && data.seoulBusTime;
+    const tryExact = async (arsId) => {
       const exact = await data.seoulBusTime(arsId, String(lane.busLocalBlID));
-      if (exact) {
-        log(`버스 ${lane.busNo}: 서울 정류소 막차 ${clock(exact.last)} (정확)`);
-        return { lane, stop: { ...exact, interval: DEFAULT_BUS_INTERVAL, estimated: false } };
+      if (!exact) {
+        log(`버스 ${lane.busNo}: 서울 정류소(${arsId}) 막차 시각 없음`);
+        return null;
       }
+      log(`버스 ${lane.busNo}: 서울 정류소(${arsId}) 막차 ${clock(exact.last)} (정확)`);
+      return { lane, stop: { ...exact, interval: DEFAULT_BUS_INTERVAL, estimated: false } };
+    };
+    if (seoul && pathArsId) {
+      const exact = await tryExact(pathArsId);
+      if (exact) return exact;
     }
     if (lane.busID == null) return null;
     const detail = await data.busLane(lane.busID);
     if (!detail) {
       log(`버스 ${lane.busNo}: 노선 정보 없음 (조회 한도 또는 오류)`);
       return null;
+    }
+    if (seoul && !pathArsId) {
+      // 길찾기 결과에 정류소 번호가 없으면 노선 정보에서 찾는다.
+      const { idx } = busStopPosition(sp, detail);
+      const arsId = idx >= 0 ? digits(detail.station[idx].arsID) : '';
+      if (arsId && arsId !== '0') {
+        const exact = await tryExact(arsId);
+        if (exact) return exact;
+      }
     }
     const { stop, reason } = estimateBusStop(sp, detail, day.dayType);
     log(stop
