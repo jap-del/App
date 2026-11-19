@@ -19,6 +19,8 @@ import {
   pickStation,
   planPath,
   serviceDay,
+  legPath,
+  estimatedCalls,
 } from '../src/last-route.js';
 
 /** 운행일 기준 분 → TAGO "HHMMSS". */
@@ -374,6 +376,64 @@ describe('경로 막차 계산', () => {
     assert.equal(clock(found.plan.departBy), '00:59');
   });
 
+  it('지하철만, 버스만, 함께 타는 막차를 따로 고른다', async () => {
+    const bus = {
+      pathType: 2,
+      subPath: [{ trafficType: 2, sectionTime: 10, stationCount: 5, startID: 0, startName: 'A', endName: 'B', lane: [{ busNo: '7', busID: 9 }] }],
+    };
+    const subway = { pathType: 1, subPath: [subwayLeg] };
+    const found = await findLastRoute([bus, subway], weekdayEvening, fakeData({ bus: { busFirstTime: '05:00', busLastTime: '22:00', station: [] } }));
+    assert.equal(found.status, 'ok');
+    assert.equal(found.plan.kind, 'subway');
+    assert.equal(clock(found.kinds.subway.plan.departBy), '00:59');
+    assert.equal(found.kinds.bus.status, 'ok');
+    assert.equal(found.kinds.bus.plan.kind, 'bus');
+    assert.ok(found.kinds.bus.plan.departBy < 22 * 60);
+    assert.deepEqual(found.kinds.mixed, { status: 'none' });
+
+    const body = toResponse(found.plan, weekdayEvening, found.later, found.kinds);
+    assert.equal(body.kind, 'subway');
+    assert.deepEqual(body.options.map((o) => [o.kind, o.status]), [['subway', 'ok'], ['bus', 'ok'], ['mixed', 'none']]);
+    assert.equal(body.options[0].departBy, body.departBy);
+    assert.equal(body.options[1].legs[0].mode, 'bus');
+    assert.equal(body.options[2].departBy, undefined);
+  });
+
+  it('한 종류의 막차가 끊겨도 다른 종류는 보여준다', async () => {
+    const bus = {
+      pathType: 2,
+      subPath: [{ trafficType: 2, sectionTime: 10, stationCount: 5, startID: 0, startName: 'A', endName: 'B', lane: [{ busNo: '7', busID: 9 }] }],
+    };
+    const day = serviceDay(new Date('2026-11-19T23:30:00+09:00'));
+    const found = await findLastRoute([bus, { pathType: 1, subPath: [subwayLeg] }], day, fakeData({ bus: { busFirstTime: '05:00', busLastTime: '22:00', station: [] } }));
+    assert.equal(found.status, 'ok');
+    assert.equal(found.kinds.subway.status, 'ok');
+    assert.equal(found.kinds.bus.status, 'missed');
+    const body = toResponse(found.plan, day, found.later, found.kinds);
+    assert.deepEqual(body.options[1], { kind: 'bus', status: 'missed' });
+  });
+
+  it('호출 한도가 모자라면 두 번째 경로부터는 건너뛴다', async () => {
+    const data = fakeData();
+    const trace = [];
+    data.log = (line) => trace.push(line);
+    data.budgetLeft = () => 5;
+    const path = { pathType: 1, subPath: [subwayLeg] };
+    const found = await findLastRoute([path, path, path], weekdayEvening, data);
+    assert.equal(found.kinds.subway.status, 'ok');
+    assert.equal(trace.filter((l) => l.includes('경로 [')).length, 1);
+    assert.ok(trace.some((l) => l.includes('2개는 호출 한도 때문에 건너뜀')));
+    assert.equal(estimatedCalls({ subPath: [subwayLeg, { trafficType: 3 }, { trafficType: 2, lane: [{}, {}, {}] }] }), 11);
+  });
+
+  it('지도에 그릴 역·정류장 좌표를 구간마다 준다', () => {
+    assert.deepEqual(legPath({
+      passStopList: { stations: [{ x: '126.9707123', y: '37.5547456' }, { x: '127.0276', y: '37.4979' }] },
+    }), [[37.55475, 126.97071], [37.4979, 127.0276]]);
+    assert.deepEqual(legPath({ startX: 126.97, startY: 37.55, endX: 127.02, endY: 37.49 }), [[37.55, 126.97], [37.49, 127.02]]);
+    assert.deepEqual(legPath({ passStopList: { stations: [{ x: '0', y: '0' }] } }), []);
+  });
+
   it('막차가 이미 지났으면 missed', async () => {
     const day = serviceDay(new Date('2026-11-20T01:30:00+09:00'));
     const found = await findLastRoute([{ pathType: 1, subPath: [subwayLeg] }], day, fakeData());
@@ -508,6 +568,19 @@ describe('/last-route', () => {
     assert.equal(search.url.searchParams.get('SY'), '37.55');
     assert.equal(search.init.headers.referer, 'https://api.example.com/');
     assert.equal(search.init.cf, undefined, '길찾기는 캐시하지 않는다');
+  });
+
+  it('종류별 막차와 지도 좌표를 함께 돌려준다', async () => {
+    const leg = {
+      ...subwayLeg,
+      passStopList: { stations: [{ stationName: 'S2', x: '127.001', y: '37.501' }, { stationName: 'S3', x: '127.002', y: '37.502' }, { stationName: 'S4', x: '127.003', y: '37.503' }] },
+    };
+    stub({ result: { path: [{ pathType: 1, subPath: [{ trafficType: 3, sectionTime: 5 }, leg] }] } });
+    const body = await (await call(`${coords}&at=2026-11-19T18:00:00%2B09:00`)).json();
+    assert.equal(body.kind, 'subway');
+    assert.deepEqual(body.options.map((o) => o.status), ['ok', 'none', 'none']);
+    assert.deepEqual(body.options[0].legs[1].path, [[37.501, 127.001], [37.502, 127.002], [37.503, 127.003]]);
+    assert.equal(body.legs[0].path, undefined, '걷는 구간은 앱이 앞뒤 좌표로 그린다');
   });
 
   it('debug=1이면 계산 과정과 함께 항상 200으로 답한다', async () => {

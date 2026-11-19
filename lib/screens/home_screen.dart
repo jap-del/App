@@ -12,6 +12,7 @@ import '../services/notification_service.dart';
 import '../services/settings_store.dart';
 import '../services/transit_service.dart';
 import 'home_setup_screen.dart';
+import 'route_map_screen.dart';
 import 'settings_screen.dart';
 
 /// 오늘의 막차 시간을 보여주는 첫 화면.
@@ -50,7 +51,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   HomePlace? _home;
   LastRoute? _route;
+  MapPoint? _here;
   int _leadMinutes = SettingsStore.defaultLeadMinutes;
+
+  /// 알림 기준으로 고른 막차 종류 (저장됨).
+  RoutePreference _preference = RoutePreference.latest;
+
+  /// 지금 화면에서 보고 있는 막차 종류.
+  RoutePreference _viewing = RoutePreference.latest;
   bool _loading = true;
   bool _noRoute = false;
   String? _error;
@@ -75,10 +83,13 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _load() async {
     final home = await widget.settings.loadHome();
     final lead = await widget.settings.loadLeadMinutes();
+    final preference = await widget.settings.loadRoutePreference();
     if (!mounted) return;
     setState(() {
       _home = home;
       _leadMinutes = lead;
+      _preference = preference;
+      _viewing = preference;
     });
     await _refresh();
   }
@@ -113,6 +124,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       if (!mounted) return;
       setState(() {
+        _here = (lat: here.lat, lng: here.lng);
         _route = route;
         _noRoute = route == null;
         _loading = false;
@@ -131,7 +143,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final notifications = widget.notifications;
     if (notifications == null) return;
     await notifications.clear();
-    final route = _route;
+    // 고른 종류의 막차가 끊겼거나 계산되지 않았으면 가장 늦은 막차로 알린다.
+    final route = _route?.pick(_preference) ?? _route;
     if (route == null) return;
     final alertAt = planAlertTime(
       departBy: route.departBy,
@@ -176,6 +189,30 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     // 일시 중지 설정이 바뀌었을 수 있다.
     if (mounted && _home != null) await _refresh();
+  }
+
+  Future<void> _changePreference(RoutePreference preference) async {
+    setState(() {
+      _preference = preference;
+      _viewing = preference;
+    });
+    await widget.settings.saveRoutePreference(preference);
+    await _updateNotifications();
+  }
+
+  void _showMap(LastRoute route) {
+    final home = _home;
+    if (home == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RouteMapScreen(
+          route: route,
+          from: _here,
+          home: (lat: home.lat, lng: home.lng),
+          title: '${_viewing.label} 이동 경로',
+        ),
+      ),
+    );
   }
 
   Future<void> _changeLead(int minutes) async {
@@ -251,9 +288,24 @@ class _HomeScreenState extends State<HomeScreen> {
           )
         else if (_noRoute)
           const Text('오늘은 집까지 가는 대중교통이 끝났어요.')
-        else if (_route != null)
-          _RouteCard(route: _route!),
+        else if (_route case final route?)
+          ..._buildRoute(context, route),
         const SizedBox(height: 24),
+        Row(
+          children: [
+            const Expanded(child: Text('어떤 막차로 알릴까요?')),
+            DropdownButton<RoutePreference>(
+              value: _preference,
+              items: [
+                for (final p in RoutePreference.values)
+                  DropdownMenuItem(value: p, child: Text(p.label)),
+              ],
+              onChanged: (p) {
+                if (p != null) _changePreference(p);
+              },
+            ),
+          ],
+        ),
         Row(
           children: [
             const Expanded(child: Text('출발 몇 분 전에 알릴까요?')),
@@ -272,12 +324,80 @@ class _HomeScreenState extends State<HomeScreen> {
       ],
     );
   }
+
+  /// 종류 고르기 칩과, 고른 종류의 막차 카드.
+  List<Widget> _buildRoute(BuildContext context, LastRoute route) {
+    final time = DateFormat('HH:mm');
+    final shown = route.pick(_viewing);
+    final option = _viewing.kind == null ? null : route.option(_viewing.kind!);
+    return [
+      if (route.options.isNotEmpty) ...[
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final p in RoutePreference.values)
+              if (p.kind == null ||
+                  route.option(p.kind!)?.status != RouteStatus.none)
+                ChoiceChip(
+                  label: Text(_chipLabel(p, route, time)),
+                  selected: _viewing == p,
+                  onSelected: (_) => setState(() => _viewing = p),
+                ),
+          ],
+        ),
+        const SizedBox(height: 12),
+      ],
+      if (shown != null)
+        _RouteCard(
+          route: shown,
+          onShowMap: shown.legs.any((l) => l.path.isNotEmpty)
+              ? () => _showMap(shown)
+              : null,
+        )
+      else
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Text(switch (option?.status) {
+              RouteStatus.missed => '${_viewing.label}로 가는 막차는 끊겼어요.',
+              RouteStatus.none => '${_viewing.label}로 가는 경로가 없어요.',
+              _ => '${_viewing.label}로 가는 막차 시간을 계산하지 못했어요.',
+            }),
+          ),
+        ),
+    ];
+  }
+
+  static String _chipLabel(
+    RoutePreference preference,
+    LastRoute route,
+    DateFormat time,
+  ) {
+    final name = switch (preference) {
+      RoutePreference.latest => '가장 늦게',
+      RoutePreference.subway => '지하철',
+      RoutePreference.bus => '버스',
+      RoutePreference.mixed => '지하철+버스',
+    };
+    final kind = preference.kind;
+    if (kind == null) return '$name ${time.format(route.departBy)}';
+    final option = route.option(kind);
+    return switch (option?.status) {
+      RouteStatus.ok => '$name ${time.format(option!.route!.departBy)}',
+      RouteStatus.missed => '$name 끊김',
+      _ => '$name 모름',
+    };
+  }
 }
 
 class _RouteCard extends StatelessWidget {
-  const _RouteCard({required this.route});
+  const _RouteCard({required this.route, this.onShowMap});
 
   final LastRoute route;
+
+  /// 지도로 보기. 좌표가 없으면 null이라 버튼을 숨긴다.
+  final VoidCallback? onShowMap;
 
   static const _icons = {
     'walk': Icons.directions_walk,
@@ -346,6 +466,15 @@ class _RouteCard extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(child: Text(leg.description)),
                   ],
+                ),
+              ),
+            if (onShowMap != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: OutlinedButton.icon(
+                  onPressed: onShowMap,
+                  icon: const Icon(Icons.map_outlined),
+                  label: const Text('지도로 보기'),
                 ),
               ),
           ],

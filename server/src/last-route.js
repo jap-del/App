@@ -3,7 +3,7 @@
 // 1. ODsay 길찾기로 집까지 가는 경로 후보를 받는다.
 // 2. 경로의 마지막 구간부터 거꾸로, 다음 구간에 늦지 않게 탈 수 있는 가장 늦은 차를 고른다.
 //    지하철은 TAGO 역별 시간표로 정확히, 버스는 ODsay 노선 막차 시간으로 추정한다.
-// 3. 집을 향해 가장 늦게 출발할 수 있는 경로를 고른다.
+// 3. 지하철만, 버스만, 함께 타는 경로마다 가장 늦게 출발할 수 있는 경로를 고른다.
 //
 // 시간은 모두 "운행일 0시부터 몇 분"으로 다룬다. 새벽 3시 전은 전날 운행으로 보므로
 // 00:30 막차는 24 * 60 + 30 = 1470분이 된다.
@@ -24,9 +24,13 @@ const BUS_OFFSET_FACTOR = 0.8;
 export const MAX_SUBWAY_PATHS = 3;
 /** 버스만 타는 경로. 서울 버스는 무료 API로 정류소 시각을 보므로 넉넉히 본다. */
 export const MAX_BUS_PATHS = 6;
-/** 버스와 지하철을 함께 타는 경로. 바깥 API 호출이 많아서 여유가 있을 때만 본다. */
+/** 버스와 지하철을 함께 타는 경로. 바깥 API 호출이 많아서 종류마다 첫 경로부터 본다. */
 export const MAX_MIXED_PATHS = 2;
-const MIXED_BUDGET_LEFT = 15;
+/** 처음에 함께 계산하는 버스 경로 수. 나머지는 호출 한도가 남으면 본다. */
+const FIRST_BUS_PATHS = 3;
+
+/** 막차 종류. 앱에서 따로 보여주고 알림 기준으로 고를 수 있다. */
+export const ROUTE_KINDS = ['subway', 'bus', 'mixed'];
 
 /** 막차 계산에는 저녁 이후 열차만 있으면 된다. 계산량을 줄이려고 그 전 열차는 버린다. */
 export const SCHEDULE_FROM_MIN = 17 * 60;
@@ -487,6 +491,21 @@ export async function planPath(path, day, data, log = data.log ?? noLog) {
   };
 }
 
+/** 좌표를 지도용 [위도, 경도]로 바꾼다. 소수 다섯째 자리(약 1m)까지만 둔다. */
+function point(x, y) {
+  const lng = Number(x);
+  const lat = Number(y);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) return null;
+  return [Math.round(lat * 1e5) / 1e5, Math.round(lng * 1e5) / 1e5];
+}
+
+/** 구간이 지나는 역·정류장 좌표 (지도에 선으로 그린다). 없으면 출발·도착 좌표만. */
+export function legPath(sp) {
+  const stops = (sp.passStopList?.stations ?? []).map((st) => point(st.x, st.y)).filter(Boolean);
+  if (stops.length >= 2) return stops;
+  return [point(sp.startX, sp.startY), point(sp.endX, sp.endY)].filter(Boolean);
+}
+
 function stationLabel(name) {
   return String(name ?? '').endsWith('역') ? name : `${name}역`;
 }
@@ -519,6 +538,7 @@ function describeLegs(subs, trips) {
         arriveMin: t.arr,
         isLast: t.isLast,
         estimated: false,
+        path: legPath(sp),
       });
     } else {
       const bus = `${t.busNo ?? sp.lane?.[0]?.busNo ?? ''}번 ${t.night ? '심야버스' : '버스'}`;
@@ -536,20 +556,59 @@ function describeLegs(subs, trips) {
         arriveMin: t.arr,
         isLast: t.isLast,
         estimated: t.estimated,
+        path: legPath(sp),
       });
     }
   });
   return legs;
 }
 
+/** ODsay 경로 종류(pathType 1 지하철, 2 버스, 그 밖은 함께 타기)를 막차 종류로 바꾼다. */
+export function pathKind(path) {
+  if (path.pathType === 1) return 'subway';
+  if (path.pathType === 2) return 'bus';
+  return 'mixed';
+}
+
 /**
- * 경로 후보 가운데 가장 늦게 출발해도 되는 경로를 고른다.
- * 반환: { status: 'ok', plan } | { status: 'missed' } (오늘 막차가 이미 지남) | { status: 'unknown' }
+ * 경로 하나를 계산하는 데 드는 바깥 API 호출 수 어림. 지하철 구간은 역 3곳과 시간표 6개,
+ * 버스 구간은 노선마다 1번. 같은 역은 캐시를 같이 쓰므로 실제로는 더 적다.
+ */
+export function estimatedCalls(path) {
+  return (path.subPath ?? []).reduce((sum, sp) => {
+    if (sp.trafficType === 1) return sum + 9;
+    if (sp.trafficType === 2) return sum + Math.min((sp.lane ?? []).length || 1, 2);
+    return sum;
+  }, 0);
+}
+
+/**
+ * 계산한 경로 가운데 지금부터 가장 늦게 출발해도 되는 것을 고른다.
+ * 일반 막차를 먼저 고르고, 그 뒤에 더 늦게 탈 수 있는 심야버스가 있으면 later로 따로 준다.
+ */
+export function pickLatest(plans, nowMin) {
+  if (!plans.length) return { status: 'unknown' };
+  const upcoming = plans.filter((p) => p.departBy >= nowMin).sort((a, b) => b.departBy - a.departBy);
+  if (!upcoming.length) return { status: 'missed' };
+  const regular = upcoming.find((p) => !p.night);
+  const night = upcoming.find((p) => p.night);
+  const plan = regular ?? night;
+  const later = regular && night && night.departBy > regular.departBy ? night : null;
+  return { status: 'ok', plan, later };
+}
+
+/**
+ * 지하철만, 버스만, 함께 타는 경로의 막차를 각각 구하고, 그중 가장 늦은 것도 고른다.
+ * 반환: { status, plan, later, kinds: { subway, bus, mixed } }
+ *   status: 'ok' | 'missed' (오늘 막차가 이미 지남) | 'unknown' (계산 못 함)
+ *   kinds의 각 값도 같은 모양이고, 그 종류의 경로가 없으면 status 'none'.
  */
 export async function findLastRoute(paths, day, data) {
-  const subwayOnly = paths.filter((p) => p.pathType === 1).slice(0, MAX_SUBWAY_PATHS);
-  const busOnly = paths.filter((p) => p.pathType === 2).slice(0, MAX_BUS_PATHS);
-  const mixed = paths.filter((p) => p.pathType !== 1 && p.pathType !== 2).slice(0, MAX_MIXED_PATHS);
+  const groups = {
+    subway: paths.filter((p) => pathKind(p) === 'subway').slice(0, MAX_SUBWAY_PATHS),
+    bus: paths.filter((p) => pathKind(p) === 'bus').slice(0, MAX_BUS_PATHS),
+    mixed: paths.filter((p) => pathKind(p) === 'mixed').slice(0, MAX_MIXED_PATHS),
+  };
   const baseLog = data.log ?? noLog;
   let count = 0;
   const run = async (path) => {
@@ -564,43 +623,55 @@ export async function findLastRoute(paths, day, data) {
     try {
       const plan = await planPath(path, day, data, log);
       log(plan ? `→ ${clock(plan.departBy)}까지 출발${plan.night ? ' (심야버스)' : ''}` : '→ 계산 못 함');
-      return plan;
+      return plan ? { ...plan, kind: pathKind(path) } : null;
     } catch (e) {
       // 한 경로의 데이터가 없어도 다른 경로는 계속 본다.
       log(`→ 오류: ${e?.message ?? e}`);
       return null;
     }
   };
-  // 경로마다 데이터를 한꺼번에 불러와 기다리는 시간을 줄인다.
-  const results = await Promise.all([...subwayOnly, ...busOnly].map(run));
-  // 버스+지하철 경로는 바깥 API를 많이 불러서, 한도가 남았을 때만 본다.
-  const left = data.budgetLeft ? data.budgetLeft() : Infinity;
-  if (mixed.length && left >= MIXED_BUDGET_LEFT) results.push(...(await Promise.all(mixed.map(run))));
-  else if (mixed.length) baseLog(`버스+지하철 경로 ${mixed.length}개는 호출 한도 때문에 건너뜀`);
+
+  // 1차: 종류마다 첫 경로(버스는 몇 개)를 한꺼번에 계산해서, 세 종류 모두 답이 나오게 한다.
+  const first = [
+    ...groups.subway.slice(0, 1),
+    ...groups.mixed.slice(0, 1),
+    ...groups.bus.slice(0, FIRST_BUS_PATHS),
+  ];
+  const results = await Promise.all(first.map(run));
+
+  // 2차: 남은 경로는 호출 한도 안에서 종류를 번갈아 가며 본다.
+  const rest = [
+    groups.subway[1], groups.mixed[1], ...groups.bus.slice(FIRST_BUS_PATHS), groups.subway[2],
+  ].filter(Boolean);
+  let left = data.budgetLeft ? data.budgetLeft() : Infinity;
+  const second = [];
+  for (const path of rest) {
+    const cost = estimatedCalls(path);
+    if (cost > left) continue;
+    left -= cost;
+    second.push(path);
+  }
+  if (second.length) results.push(...(await Promise.all(second.map(run))));
+  if (rest.length > second.length) baseLog(`경로 ${rest.length - second.length}개는 호출 한도 때문에 건너뜀`);
 
   const plans = results.filter(Boolean);
-  if (!plans.length) return { status: 'unknown' };
-  const upcoming = plans.filter((p) => p.departBy >= day.nowMin).sort((a, b) => b.departBy - a.departBy);
-  if (!upcoming.length) return { status: 'missed' };
-  // 화면과 알림은 일반 막차 기준으로 하고, 그 뒤에 심야버스가 있으면 따로 알려준다.
-  const regular = upcoming.find((p) => !p.night);
-  const night = upcoming.find((p) => p.night);
-  const plan = regular ?? night;
-  const later = regular && night && night.departBy > regular.departBy ? night : null;
-  return { status: 'ok', plan, later };
+  const kinds = {};
+  for (const kind of ROUTE_KINDS) {
+    kinds[kind] = groups[kind].length
+      ? pickLatest(plans.filter((p) => p.kind === kind), day.nowMin)
+      : { status: 'none' };
+  }
+  return { ...pickLatest(plans, day.nowMin), kinds };
 }
 
-/** 앱으로 보낼 JSON. 앱의 LastRoute.fromJson과 맞춘다. */
-export function toResponse(plan, day, later = null) {
+/** 막차 하나(와 그 뒤 심야버스)를 앱으로 보낼 모양으로 바꾼다. */
+function planJson(plan, day, later = null) {
   const body = {
     departBy: toIso(day, plan.departBy),
     arriveAt: toIso(day, plan.arriveAt),
     estimated: plan.estimated,
     night: Boolean(plan.night),
-    serviceDate: day.date,
-    dayType: day.dayType,
     legs: legsJson(plan.legs, day),
-    sources: ['ODsay', '국토교통부(TAGO)', '서울특별시'],
   };
   if (later) {
     body.nightBus = {
@@ -609,6 +680,29 @@ export function toResponse(plan, day, later = null) {
       buses: later.legs.filter((l) => l.mode === 'bus').map((l) => l.line.replace(/번 (심야버스|버스)$/, '')),
       legs: legsJson(later.legs, day),
     };
+  }
+  return body;
+}
+
+/**
+ * 앱으로 보낼 JSON. 앱의 LastRoute.fromJson과 맞춘다.
+ * 맨 위는 가장 늦은 막차(예전 앱도 읽는 모양)이고, options에 종류별 막차가 들어간다.
+ */
+export function toResponse(plan, day, later = null, kinds = null) {
+  const body = {
+    ...planJson(plan, day, later),
+    kind: plan.kind ?? null,
+    serviceDate: day.date,
+    dayType: day.dayType,
+    sources: ['ODsay', '국토교통부(TAGO)', '서울특별시'],
+  };
+  if (kinds) {
+    body.options = ROUTE_KINDS.map((kind) => {
+      const found = kinds[kind] ?? { status: 'none' };
+      return found.status === 'ok'
+        ? { kind, status: 'ok', ...planJson(found.plan, day, found.later) }
+        : { kind, status: found.status };
+    });
   }
   return body;
 }

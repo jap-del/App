@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:last_train/models/home_place.dart';
+import 'package:last_train/models/last_route.dart';
 import 'package:last_train/services/transit_service.dart';
 
 const home = HomePlace(name: '우리 집', lat: 37.4979, lng: 127.0276);
@@ -75,6 +76,81 @@ void main() {
       route.nightBus!.departBy,
       DateTime.utc(2026, 11, 19, 19, 7).toLocal(),
     );
+  });
+
+  test('종류별 막차와 지도 좌표를 읽는다', () async {
+    final service = BackendTransitService(
+      'https://api.example.com',
+      client: MockClient(
+        (_) async => jsonResponse({
+          ...okBody,
+          'kind': 'subway',
+          'legs': [
+            {'mode': 'walk', 'description': '걸어서 3분', 'minutes': 3},
+            {
+              'mode': 'subway',
+              'description': '4호선',
+              'path': [
+                [37.5547, 126.9707],
+                [37.5443, 126.9723],
+              ],
+            },
+          ],
+          'options': [
+            {'kind': 'subway', 'status': 'ok', ...okBody},
+            {
+              'kind': 'bus',
+              'status': 'ok',
+              ...okBody,
+              'departBy': '2026-11-19T16:29:00.000Z',
+              'nightBus': {
+                'departBy': '2026-11-19T17:39:00.000Z',
+                'buses': ['N75'],
+              },
+            },
+            {'kind': 'mixed', 'status': 'missed'},
+            {'kind': 'ferry', 'status': 'ok'},
+          ],
+        }, 200),
+      ),
+    );
+    final route = await service.lastRouteHome(
+      fromLat: 37.5,
+      fromLng: 127,
+      home: home,
+    );
+    expect(route!.kind, RouteKind.subway);
+    expect(route.legs[0].path, isEmpty);
+    expect(route.legs[1].path, [
+      (lat: 37.5547, lng: 126.9707),
+      (lat: 37.5443, lng: 126.9723),
+    ]);
+    expect(route.options.map((o) => o.kind), [
+      RouteKind.subway,
+      RouteKind.bus,
+      RouteKind.mixed,
+    ]);
+    final bus = route.pick(RoutePreference.bus)!;
+    expect(bus.departBy, DateTime.utc(2026, 11, 19, 16, 29).toLocal());
+    expect(bus.kind, RouteKind.bus);
+    expect(bus.nightBus!.buses, ['N75']);
+    expect(route.option(RouteKind.mixed)!.status, RouteStatus.missed);
+    expect(route.pick(RoutePreference.mixed), isNull);
+    expect(route.pick(RoutePreference.latest), same(route));
+  });
+
+  test('예전 서버처럼 종류별 막차가 없으면 가장 늦은 막차를 쓴다', () async {
+    final service = BackendTransitService(
+      'https://api.example.com',
+      client: MockClient((_) async => jsonResponse(okBody, 200)),
+    );
+    final route = await service.lastRouteHome(
+      fromLat: 37.5,
+      fromLng: 127,
+      home: home,
+    );
+    expect(route!.options, isEmpty);
+    expect(route.pick(RoutePreference.subway), same(route));
   });
 
   test('막차가 끊겼으면 null', () async {
