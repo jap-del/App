@@ -48,6 +48,33 @@ void main() {
     expect(route.estimated, isTrue);
     expect(route.isSample, isFalse);
     expect(route.legs.map((l) => l.mode), ['walk', 'subway']);
+    expect(route.nightBus, isNull);
+  });
+
+  test('일반 막차 뒤의 심야버스를 읽는다', () async {
+    final service = BackendTransitService(
+      'https://api.example.com',
+      client: MockClient(
+        (_) async => jsonResponse({
+          ...okBody,
+          'nightBus': {
+            'departBy': '2026-11-19T19:07:00.000Z',
+            'buses': ['N75'],
+            'legs': [],
+          },
+        }, 200),
+      ),
+    );
+    final route = await service.lastRouteHome(
+      fromLat: 37.5,
+      fromLng: 127,
+      home: home,
+    );
+    expect(route!.nightBus!.buses, ['N75']);
+    expect(
+      route.nightBus!.departBy,
+      DateTime.utc(2026, 11, 19, 19, 7).toLocal(),
+    );
   });
 
   test('막차가 끊겼으면 null', () async {

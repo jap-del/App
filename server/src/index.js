@@ -205,7 +205,7 @@ async function lastRouteResponse(params, env, origin, log) {
   }
   const found = await findLastRoute(paths, day, data);
   log?.(`바깥 API 호출 ${data.subrequests()}번`);
-  if (found.status === 'ok') return json(toResponse(found.plan, day));
+  if (found.status === 'ok') return json(toResponse(found.plan, day, found.later));
   if (found.status === 'missed') {
     return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed' }, 404);
   }
@@ -276,6 +276,7 @@ function createData(env, origin) {
 
   return {
     subrequests: () => subrequests,
+    budgetLeft: () => SUBREQUEST_BUDGET - subrequests,
 
     async odsay(api, query) {
       const upstream = new URL(`${ODSAY_BASE}/${api}`);

@@ -5,7 +5,10 @@ import {
   busTripFromLane,
   clock,
   estimateBusStop,
+  isNightBus,
   parseSeoulBusTime,
+  toResponse,
+  wrapStopTimes,
   directionScore,
   findLastRoute,
   latestTrip,
@@ -386,6 +389,55 @@ describe('경로 막차 계산', () => {
   it('고속버스나 열차가 섞인 경로는 건너뛴다', async () => {
     const found = await findLastRoute([{ pathType: 11, subPath: [{ trafficType: 4 }] }], weekdayEvening, fakeData());
     assert.equal(found.status, 'unknown');
+  });
+});
+
+describe('심야버스', () => {
+  const busPath = (busNo, routeId) => ({
+    pathType: 2,
+    subPath: [
+      { trafficType: 3, sectionTime: 2 },
+      {
+        trafficType: 2, sectionTime: 28, startID: 1, startArsID: '02004', startName: '서울역버스환승센터', endName: '강남역',
+        lane: [{ busNo, busID: 1, busLocalBlID: routeId, busCityCode: 1000 }],
+      },
+    ],
+  });
+  const times = {
+    R402: { first: 4 * 60, last: 25 * 60 + 33 }, // 01:33
+    RN75: { first: 23 * 60 + 40, last: 4 * 60 + 10 }, // 23:40 ~ 다음 날 04:10
+  };
+  function data() {
+    const d = fakeData();
+    d.seoulBusTime = async (_ars, routeId) => times[routeId] ?? null;
+    return d;
+  }
+
+  it('자정을 넘어 끝나는 노선은 막차에 하루를 더한다', () => {
+    assert.equal(wrapStopTimes({ first: 1420, last: 250 }).last, 1690);
+    assert.equal(wrapStopTimes({ first: 240, last: 1533 }).last, 1533);
+    assert.equal(isNightBus({ busNo: 'N75' }), true);
+    assert.equal(isNightBus({ busNo: '402' }), false);
+  });
+
+  it('일반 막차를 먼저 보여주고 그 뒤 심야버스를 따로 알려준다', async () => {
+    const found = await findLastRoute([busPath('402', 'R402'), busPath('N75', 'RN75')], weekdayEvening, data());
+    assert.equal(found.status, 'ok');
+    assert.equal(clock(found.plan.departBy), '01:30');
+    assert.equal(found.plan.night, false);
+    assert.equal(clock(found.later.departBy), '04:07');
+    const body = toResponse(found.plan, weekdayEvening, found.later);
+    assert.deepEqual(body.nightBus.buses, ['N75']);
+    assert.match(body.nightBus.legs[1].description, /^N75번 심야버스 서울역버스환승센터 04:10 막차/);
+    assert.equal(body.night, false);
+  });
+
+  it('일반 막차가 끊기면 심야버스를 보여준다', async () => {
+    const day = serviceDay(new Date('2026-11-20T02:00:00+09:00'));
+    const found = await findLastRoute([busPath('402', 'R402'), busPath('N75', 'RN75')], day, data());
+    assert.equal(found.status, 'ok');
+    assert.equal(found.plan.night, true);
+    assert.equal(found.later, null);
   });
 });
 
