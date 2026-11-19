@@ -150,6 +150,26 @@ async function odsay(api, params, env, origin) {
  * 위치는 계산에만 쓰고 저장하거나 캐시하지 않는다.
  */
 async function lastRoute(params, env, origin) {
+  if (params.get('debug') === '1') return lastRouteDebug(params, env, origin);
+  return lastRouteResponse(params, env, origin);
+}
+
+/**
+ * 개발용: 계산 과정을 함께 보여주고 항상 200으로 답한다 (확인 도구가 오류 응답 본문을 못 읽어서).
+ * 좌표와 키는 기록에 넣지 않는다.
+ */
+async function lastRouteDebug(params, env, origin) {
+  const trace = [];
+  let res;
+  try {
+    res = await lastRouteResponse(params, env, origin, (line) => trace.push(line));
+  } catch (e) {
+    return json({ status: 500, error: String(e?.message ?? e), trace });
+  }
+  return json({ status: res.status, body: await res.json(), trace });
+}
+
+async function lastRouteResponse(params, env, origin, log) {
   const coords = ['fromLat', 'fromLng', 'toLat', 'toLng'].map((k) => Number(params.get(k)));
   const [fromLat, fromLng, toLat, toLng] = coords;
   if (coords.some((n) => !Number.isFinite(n)) || !inKorea(fromLat, fromLng) || !inKorea(toLat, toLng)) {
@@ -163,12 +183,15 @@ async function lastRoute(params, env, origin) {
 
   const day = serviceDay(now);
   const data = createData(env, origin);
+  if (log) data.log = log;
+  log?.(`운행일 ${day.date} ${day.dayType}, 지금 ${Math.floor(day.nowMin / 60)}시 ${Math.floor(day.nowMin % 60)}분`);
   let paths;
   try {
     const result = await data.odsay('searchPubTransPathT', {
       SX: fromLng, SY: fromLat, EX: toLng, EY: toLat,
     });
     paths = result.path ?? [];
+    log?.(`길찾기 경로 ${paths.length}개 (지하철 ${paths.filter((p) => p.pathType === 1).length}, 버스 ${paths.filter((p) => p.pathType === 2).length}, 버스+지하철 ${paths.filter((p) => p.pathType === 3).length})`);
   } catch (e) {
     if (e.code === '-98') {
       return json({ error: '집이 아주 가까워요. 걸어서 갈 수 있어요.', reason: 'too-close' }, 404);
@@ -179,6 +202,7 @@ async function lastRoute(params, env, origin) {
     throw e;
   }
   const found = await findLastRoute(paths, day, data);
+  log?.(`바깥 API 호출 ${data.subrequests()}번`);
   if (found.status === 'ok') return json(toResponse(found.plan, day));
   if (found.status === 'missed') {
     return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed' }, 404);
@@ -249,6 +273,8 @@ function createData(env, origin) {
   }
 
   return {
+    subrequests: () => subrequests,
+
     async odsay(api, query) {
       const upstream = new URL(`${ODSAY_BASE}/${api}`);
       for (const [k, v] of Object.entries(query)) upstream.searchParams.set(k, String(v));

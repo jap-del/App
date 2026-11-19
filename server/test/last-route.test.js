@@ -355,6 +355,18 @@ describe('/last-route', () => {
     assert.equal(search.init.cf, undefined, '길찾기는 캐시하지 않는다');
   });
 
+  it('debug=1이면 계산 과정과 함께 항상 200으로 답한다', async () => {
+    stub({ result: { path: [{ pathType: 1, subPath: [subwayLeg] }] } });
+    const res = await call(`${coords}&at=2026-11-20T01:30:00%2B09:00&debug=1`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.status, 404);
+    assert.equal(body.body.reason, 'missed');
+    assert.ok(body.trace.some((line) => line.startsWith('경로 [수도권 9호선]')));
+    assert.ok(body.trace.some((line) => line.includes('방향 점수')));
+    assert.ok(!JSON.stringify(body).includes('37.55'), '좌표는 기록에 넣지 않는다');
+  });
+
   it('좌표가 없거나 한국 밖이면 400', async () => {
     stub({});
     assert.equal((await call('fromLat=37.5&fromLng=126.9')).status, 400);

@@ -21,8 +21,11 @@ export const BOARD_BUFFER = { subway: 3, bus: 1 };
 const BUS_OFFSET_FACTOR = 0.8;
 
 /** 한 번 요청에 살펴볼 경로 수. ODsay 호출 수를 아끼기 위해 버스 경로는 더 적게 본다. */
-export const MAX_SUBWAY_PATHS = 5;
-export const MAX_BUS_PATHS = 3;
+export const MAX_SUBWAY_PATHS = 3;
+export const MAX_BUS_PATHS = 2;
+
+/** 막차 계산에는 저녁 이후 열차만 있으면 된다. 계산량을 줄이려고 그 전 열차는 버린다. */
+export const SCHEDULE_FROM_MIN = 17 * 60;
 
 /** 지금 시각이 속한 운행일과 시간표 종류. */
 export function serviceDay(now = new Date()) {
@@ -77,12 +80,13 @@ export function tagoItems(data) {
 }
 
 /** TAGO 역별 시간표를 운행일 기준 분으로 바꾼다. */
-export function parseTagoSchedule(items) {
+export function parseTagoSchedule(items, fromMin = SCHEDULE_FROM_MIN) {
   const runs = [];
   for (const it of items) {
     const dep = parseHms(it.depTime);
     const arr = parseHms(it.arrTime) ?? dep;
     if (dep == null && arr == null) continue;
+    if ((dep ?? arr) < fromMin) continue;
     runs.push({
       dep: dep ?? arr,
       arr: arr ?? dep,
@@ -201,7 +205,10 @@ export function latestTrip(trips, deadline) {
   return { ...best, isLast: best === last };
 }
 
+const noLog = () => {};
+
 async function subwayTrip(sp, day, deadline, data) {
+  const log = data.log ?? noLog;
   const lane = sp.lane?.[0];
   const stations = sp.passStopList?.stations ?? [];
   const nextName = stations[1]?.stationName ?? sp.endName;
@@ -210,6 +217,7 @@ async function subwayTrip(sp, day, deadline, data) {
     data.findSubwayStation(nextName, lane),
     data.findSubwayStation(sp.endName, lane),
   ]);
+  log(`역 찾기 ${lane?.name}: ${sp.startName}=${from?.id} ${nextName}=${next?.id} ${sp.endName}=${to?.id}`);
   if (!from || !next || !to) return null;
 
   const [startU, startD, nextU, nextD] = await Promise.all([
@@ -222,6 +230,7 @@ async function subwayTrip(sp, day, deadline, data) {
   const scoreU = directionScore(startU, nextU, next.id, perStation);
   const scoreD = directionScore(startD, nextD, next.id, perStation);
   const best = Math.max(scoreU, scoreD);
+  log(`방향 점수 U=${scoreU.toFixed(2)} D=${scoreD.toFixed(2)} (열차 수 출발 U${startU.length}/D${startD.length}, 다음 역 U${nextU.length}/D${nextD.length})`);
   if (best < 0.6 || Math.abs(scoreU - scoreD) < 0.2) return null;
   const dir = scoreU > scoreD ? 'U' : 'D';
   const startRuns = dir === 'U' ? startU : startD;
@@ -231,6 +240,7 @@ async function subwayTrip(sp, day, deadline, data) {
 
   const trips = matchTrips(startRuns, endRuns, to.id, sp.sectionTime ?? 0);
   const trip = latestTrip(trips, deadline);
+  log(`${dir} 방향 짝지은 열차 ${trips.length}개 (도착역 ${endRuns.length}개), 고른 열차 ${trip ? `${clock(trip.dep)}→${clock(trip.arr)} ${trip.endName}행` : '없음'}`);
   if (!trip) return null;
   return { ...trip, estimated: false };
 }
@@ -279,12 +289,17 @@ export function busOffset(sp, detail) {
 }
 
 async function busTrip(sp, day, deadline, data) {
+  const log = data.log ?? noLog;
   let best = null;
   for (const lane of (sp.lane ?? []).slice(0, 2)) {
     if (lane.busID == null) continue;
     const detail = await data.busLane(lane.busID);
-    if (!detail) continue;
+    if (!detail) {
+      log(`버스 ${lane.busNo}: 노선 정보 없음 (조회 한도 또는 오류)`);
+      continue;
+    }
     const trip = busTripFromLane(sp, detail, deadline, day.dayType);
+    log(`버스 ${lane.busNo}: 기점 막차 ${detail.busLastTime}, 추정 ${trip ? `${clock(trip.dep)}${trip.isLast ? ' 막차' : ''}` : '탈 수 없음'}`);
     if (trip && (!best || trip.dep > best.dep)) best = { ...trip, busNo: lane.busNo };
   }
   return best;
@@ -388,13 +403,21 @@ function describeLegs(subs, trips) {
 export async function findLastRoute(paths, day, data) {
   const subwayOnly = paths.filter((p) => p.pathType === 1).slice(0, MAX_SUBWAY_PATHS);
   const withBus = paths.filter((p) => p.pathType !== 1).slice(0, MAX_BUS_PATHS);
+  const log = data.log ?? noLog;
   const plans = [];
   for (const path of [...subwayOnly, ...withBus]) {
+    const summary = (path.subPath ?? [])
+      .filter((s) => s.trafficType !== 3)
+      .map((s) => (s.trafficType === 1 ? s.lane?.[0]?.name : `${s.lane?.[0]?.busNo}번`) ?? `종류${s.trafficType}`)
+      .join(' > ');
+    log(`경로 [${summary}]`);
     try {
       const plan = await planPath(path, day, data);
+      log(plan ? `→ ${clock(plan.departBy)}까지 출발` : '→ 계산 못 함');
       if (plan) plans.push(plan);
-    } catch {
+    } catch (e) {
       // 한 경로의 데이터가 없어도 다른 경로는 계속 본다.
+      log(`→ 오류: ${e?.message ?? e}`);
     }
   }
   if (!plans.length) return { status: 'unknown' };
