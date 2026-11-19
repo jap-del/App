@@ -20,11 +20,23 @@ abstract class TransitService {
 /// 교통 API 키는 앱에 넣지 않고 서버에만 둔다. 서버 주소는 빌드할 때
 /// `--dart-define=API_BASE_URL=https://...` 로 넘긴다.
 class BackendTransitService implements TransitService {
-  BackendTransitService(this.baseUrl, {http.Client? client})
-    : _client = client ?? http.Client();
+  BackendTransitService(
+    this.baseUrl, {
+    http.Client? client,
+    DateTime Function()? now,
+  }) : _client = client ?? http.Client(),
+       _now = now ?? DateTime.now;
 
   final String baseUrl;
   final http.Client _client;
+  final DateTime Function() _now;
+
+  /// 길찾기 API는 호출 수가 제한돼 있어서, 거의 같은 자리에서 다시 물으면
+  /// 잠시 전 결과를 다시 쓴다.
+  static const cacheFor = Duration(minutes: 10);
+  String? _cacheKey;
+  DateTime? _cachedAt;
+  LastRoute? _cached;
 
   @override
   Future<LastRoute?> lastRouteHome({
@@ -32,6 +44,22 @@ class BackendTransitService implements TransitService {
     required double fromLng,
     required HomePlace home,
   }) async {
+    // 소수 셋째 자리(약 100m)까지만 같으면 같은 자리로 본다.
+    final key = [
+      fromLat,
+      fromLng,
+      home.lat,
+      home.lng,
+    ].map((v) => v.toStringAsFixed(3)).join(',');
+    final now = _now();
+    final cachedAt = _cachedAt;
+    if (key == _cacheKey &&
+        cachedAt != null &&
+        now.difference(cachedAt) < cacheFor &&
+        (_cached == null || _cached!.departBy.isAfter(now))) {
+      return _cached;
+    }
+
     final uri = Uri.parse('$baseUrl/last-route').replace(
       queryParameters: {
         'fromLat': '$fromLat',
@@ -40,14 +68,35 @@ class BackendTransitService implements TransitService {
         'toLng': '${home.lng}',
       },
     );
-    final response = await _client.get(uri);
-    if (response.statusCode == 404) return null;
-    if (response.statusCode != 200) {
-      throw Exception('막차 정보를 가져오지 못했습니다 (${response.statusCode})');
+    final response = await _client
+        .get(uri)
+        .timeout(const Duration(seconds: 25));
+    final body = _decode(response);
+    LastRoute? route;
+    if (response.statusCode == 200 && body != null) {
+      route = LastRoute.fromJson(body);
+    } else if (response.statusCode == 404 &&
+        (body?['reason'] == 'missed' || body?['reason'] == 'no-route')) {
+      route = null;
+    } else {
+      throw Exception(
+        body?['error'] as String? ??
+            '막차 정보를 가져오지 못했어요 (${response.statusCode})',
+      );
     }
-    return LastRoute.fromJson(
-      jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>,
-    );
+    _cacheKey = key;
+    _cachedAt = now;
+    _cached = route;
+    return route;
+  }
+
+  static Map<String, dynamic>? _decode(http.Response response) {
+    try {
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      return data is Map<String, dynamic> ? data : null;
+    } on FormatException {
+      return null;
+    }
   }
 }
 
@@ -83,10 +132,17 @@ class SampleTransitService implements TransitService {
   }
 }
 
-/// 서버 주소가 설정돼 있으면 실제 서비스, 아니면 예시 서비스를 쓴다.
+/// 막차 계산 서버 (Cloudflare Workers).
+const defaultApiBaseUrl = 'https://last-train-api.lasttrain-japdel.workers.dev';
+
+/// 기본은 실제 서버를 쓴다. `--dart-define=API_BASE_URL=sample` 로 실행하면
+/// 서버 없이 예시 데이터를 보여준다.
 TransitService createTransitService() {
-  const baseUrl = String.fromEnvironment('API_BASE_URL');
-  return baseUrl.isEmpty
+  const baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: defaultApiBaseUrl,
+  );
+  return baseUrl == 'sample'
       ? SampleTransitService()
       : BackendTransitService(baseUrl);
 }

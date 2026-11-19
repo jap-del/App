@@ -312,6 +312,14 @@ class _RouteCard extends StatelessWidget {
             Text('남은 시간 ${formatRemaining(remaining)}'),
             const SizedBox(height: 4),
             Text('도착 예정 ${time.format(route.arriveAt)}'),
+            if (route.estimated)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  '버스 막차는 추정 시간이에요. 정류장 시간표도 함께 확인해 주세요.',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
             const Divider(height: 32),
             for (final leg in route.legs)
               Padding(

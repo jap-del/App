@@ -46,3 +46,8 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# 서버 (server/.gitignore가 없는 브랜치에서도 올라가지 않게)
+server/node_modules/
+server/.wrangler/
+server/.dev.vars
