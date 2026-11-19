@@ -1,20 +1,22 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
-import worker, { xmlReason } from '../src/index.js';
+import worker, { odsayReason, xmlReason } from '../src/index.js';
 
 const realFetch = globalThis.fetch;
 
 /** 업스트림 호출을 가짜로 바꾸고, 불린 주소를 기록한다. */
 function stubFetch(impl) {
   const calls = [];
+  calls.inits = [];
   globalThis.fetch = async (url, init) => {
     calls.push(String(url));
+    calls.inits.push(init);
     return impl(url, init);
   };
   return calls;
 }
 
-const env = { DATA_GO_KR_KEY: 'test+key/==', SEOUL_SUBWAY_KEY: 'seoulkey' };
+const env = { DATA_GO_KR_KEY: 'test+key/==', SEOUL_SUBWAY_KEY: 'seoulkey', ODSAY_KEY: 'odsay/key+1' };
 
 function call(path, e = env) {
   return worker.fetch(new Request(`https://api.example.com${path}`), e);
@@ -88,6 +90,52 @@ describe('서울 실시간 지하철 프록시', () => {
   it('역 이름이 없으면 400', async () => {
     mockUpstream('{}');
     assert.equal((await call('/seoul/arrivals')).status, 400);
+  });
+});
+
+describe('ODsay 프록시', () => {
+  it('서버 주소를 Referer로, 키를 apiKey로 붙여 부른다', async () => {
+    const upstream = mockUpstream('{"result":{"path":[]}}');
+    const res = await call('/odsay/searchPubTransPathT?SX=126.97&SY=37.55&EX=127.02&EY=37.49&apiKey=hacked');
+    assert.equal(res.status, 200);
+    const called = new URL(upstream[0]);
+    assert.equal(called.origin + called.pathname, 'https://api.odsay.com/v1/api/searchPubTransPathT');
+    assert.deepEqual(called.searchParams.getAll('apiKey'), ['odsay/key+1']);
+    assert.equal(called.searchParams.get('SX'), '126.97');
+    assert.equal(upstream.inits[0].headers.referer, 'https://api.example.com/');
+  });
+
+  it('좌표가 들어가는 길찾기는 캐시하지 않는다', async () => {
+    const upstream = mockUpstream('{"result":{}}');
+    const res = await call('/odsay/searchPubTransPathT?SX=1&SY=2&EX=3&EY=4');
+    assert.equal(upstream.inits[0].cf, undefined);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+  });
+
+  it('시간표는 캐시한다', async () => {
+    const upstream = mockUpstream('{"result":{}}');
+    await call('/odsay/searchSubwaySchedule?stationID=222');
+    assert.equal(upstream.inits[0].cf.cacheTtl, 21600);
+  });
+
+  it('ODsay 오류는 키 없이 원인만 돌려준다', async () => {
+    mockUpstream('{"error":[{"code":"500","message":"[ApiKeyAuthFailed] ApiKey authentication failed."}]}');
+    const res = await call('/odsay/searchPubTransPathT?SX=1&SY=2&EX=3&EY=4');
+    assert.equal(res.status, 502);
+    const body = await res.text();
+    assert.ok(body.includes('ApiKeyAuthFailed'));
+    assert.ok(!body.includes('odsay/key+1'));
+  });
+
+  it('목록에 없는 API는 막는다', async () => {
+    const upstream = mockUpstream('{}');
+    assert.equal((await call('/odsay/trainServiceTime')).status, 404);
+    assert.equal(upstream.length, 0);
+  });
+
+  it('오류 형식을 읽는다', () => {
+    assert.equal(odsayReason('{"error":{"code":"-8","msg":"필수 입력값 형식 및 범위 오류"}}'), '-8 필수 입력값 형식 및 범위 오류');
+    assert.equal(odsayReason('{"result":{}}'), null);
   });
 });
 

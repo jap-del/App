@@ -35,6 +35,10 @@
    npx wrangler secret put SEOUL_SUBWAY_KEY
    ```
    서울 열린데이터광장의 **실시간 지하철 인증키**를 붙여넣습니다.
+   ```sh
+   npx wrangler secret put ODSAY_KEY
+   ```
+   ODsay LAB에서 플랫폼을 **URI**로, 주소를 이 서버 주소(`https://last-train-api.○○○.workers.dev`)로 등록해 받은 키를 붙여넣습니다.
 
 ## 확인
 
@@ -52,6 +56,7 @@
 | `/seoul/arrivals?station=역이름` | 서울 지하철 역별 실시간 도착정보 |
 | `/seoul/positions?line=2호선` | 서울 지하철 노선별 실시간 열차 위치 |
 | `/tago/{서비스}/{기능}?...` | 공공데이터포털 TAGO API (지하철 시간표, 버스 도착·위치·정류소·노선) |
+| `/odsay/{API}?...` | ODsay (길찾기, 지하철 시간표, 버스 노선 상세) |
 
 ## 지키는 것
 

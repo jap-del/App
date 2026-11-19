@@ -5,6 +5,20 @@
 
 const TAGO_BASE = 'https://apis.data.go.kr/1613000';
 const SEOUL_BASE = 'http://swopenapi.seoul.go.kr/api/subway';
+const ODSAY_BASE = 'https://api.odsay.com/v1/api';
+
+/**
+ * 앱이 부를 수 있는 ODsay API와 캐시 시간(초).
+ * 좌표가 들어가는 길찾기는 캐시하지 않는다 (이용자 위치를 남기지 않기 위해).
+ */
+export const ODSAY_APIS = {
+  searchPubTransPathT: 0, // 대중교통 길찾기
+  searchSubwaySchedule: 6 * 60 * 60, // 지하철역 전체 시간표
+  subwayTimeTable: 6 * 60 * 60, // 지하철역 전체 시간표(구)
+  subwayStationInfo: 6 * 60 * 60, // 지하철역 세부 정보
+  busLaneDetail: 6 * 60 * 60, // 버스 노선 상세 (첫차, 막차)
+  busStationInfo: 60 * 60, // 버스 정류장 세부 정보
+};
 
 /** 앱이 부를 수 있는 TAGO 서비스 목록. 이 밖의 요청은 막는다. */
 export const TAGO_SERVICES = new Set([
@@ -38,6 +52,9 @@ export default {
       }
       if (parts[0] === 'seoul' && parts.length === 2) {
         return await seoul(parts[1], url.searchParams, env);
+      }
+      if (parts[0] === 'odsay' && parts.length === 2) {
+        return await odsay(parts[1], url.searchParams, env, url.origin);
       }
       return json({ error: '없는 주소입니다.' }, 404);
     } catch (e) {
@@ -93,14 +110,37 @@ async function seoul(kind, params, env) {
   return forward(upstream, 0);
 }
 
-async function forward(upstream, cacheSeconds) {
-  const init = cacheSeconds > 0
-    ? { cf: { cacheTtl: cacheSeconds, cacheEverything: true } }
-    : {};
+/**
+ * ODsay API. 키는 ODsay에 이 서버 주소(URI)로 등록하고, 요청에 서버 주소를
+ * Referer로 붙인다. 예: /odsay/searchPubTransPathT?SX=126.97&SY=37.55&EX=127.02&EY=37.49
+ */
+async function odsay(api, params, env, origin) {
+  if (!Object.hasOwn(ODSAY_APIS, api)) {
+    return json({ error: '지원하지 않는 서비스입니다.' }, 404);
+  }
+  if (!env.ODSAY_KEY) {
+    return json({ error: '서버에 ODsay 키가 없습니다.' }, 500);
+  }
+  const upstream = new URL(`${ODSAY_BASE}/${api}`);
+  for (const [k, v] of params) {
+    if (k !== 'apiKey') upstream.searchParams.set(k, v);
+  }
+  upstream.searchParams.set('apiKey', env.ODSAY_KEY);
+  return forward(upstream, ODSAY_APIS[api], { referer: `${origin}/` });
+}
+
+async function forward(upstream, cacheSeconds, headers = {}) {
+  const init = { headers };
+  if (cacheSeconds > 0) init.cf = { cacheTtl: cacheSeconds, cacheEverything: true };
   const res = await fetch(upstream.toString(), init);
   const body = await res.text();
   if (!res.ok) {
     return json({ error: '교통 정보 서버가 응답하지 않습니다.', status: res.status }, 502);
+  }
+  // ODsay는 오류도 200으로 돌려준다. 오류 내용에 키가 들어가지 않게 원인만 남긴다.
+  const odsayError = odsayReason(body);
+  if (odsayError) {
+    return json({ error: '길찾기 서버가 오류를 돌려줬습니다.', detail: odsayError }, 502);
   }
   // 공공데이터포털은 키 오류일 때도 200으로 XML을 돌려준다.
   if (body.trimStart().startsWith('<')) {
@@ -112,6 +152,19 @@ async function forward(upstream, cacheSeconds) {
       'cache-control': cacheSeconds > 0 ? `public, max-age=${cacheSeconds}` : 'no-store',
     },
   });
+}
+
+/** ODsay 오류 응답이면 코드와 메시지를, 아니면 null을 돌려준다. */
+export function odsayReason(body) {
+  if (!body.includes('"error"')) return null;
+  try {
+    const data = JSON.parse(body);
+    const err = Array.isArray(data.error) ? data.error[0] : data.error;
+    if (!err) return null;
+    return `${err.code ?? ''} ${err.message ?? err.msg ?? ''}`.trim() || 'unknown';
+  } catch {
+    return null;
+  }
 }
 
 /** XML 오류 응답에서 원인 문구만 꺼낸다 (예: SERVICE_KEY_IS_NOT_REGISTERED_ERROR). */
