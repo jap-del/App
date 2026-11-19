@@ -12,7 +12,7 @@
 - 첫 실행 동의 화면 (만 14세 이상, 위치기반서비스 이용약관, 접근권한 안내)
 - 설정: 위치 사용 일시 중지, 동의 철회, 개인정보처리방침, 이용약관, 데이터 출처, 오픈소스 라이선스
 
-아직 실제 교통 데이터는 연결되지 않았습니다. 서버 주소를 넘기지 않으면 화면에 "예시 데이터"라고 표시되는 가짜 막차 시간이 나옵니다.
+- 실제 막차 계산: `server/`의 막차 서버(`/last-route`)에서 ODsay 길찾기와 TAGO 지하철 시간표로 계산 (버스는 추정)
 
 ## 실행
 
@@ -21,11 +21,13 @@ flutter pub get
 flutter run
 ```
 
-서버가 준비되면 주소를 넘겨 실제 데이터를 씁니다.
+기본으로 배포된 막차 서버(`https://last-train-api.lasttrain-japdel.workers.dev`)를 씁니다. 서버 없이 화면만 확인하려면 예시 데이터로 실행합니다.
 
 ```sh
-flutter run --dart-define=API_BASE_URL=https://example.com
+flutter run --dart-define=API_BASE_URL=sample
 ```
+
+ODsay 무료 요금제는 하루 30번까지라서, 앱은 같은 자리에서 10분 안에 다시 물으면 앞의 결과를 다시 씁니다.
 
 교통 API 키는 앱에 넣지 않고 서버에만 둡니다.
 
@@ -70,7 +72,6 @@ flutter test
 
 ## 다음 작업
 
-- 서버: ODsay 길찾기와 공공데이터 API로 전국 막차 경로 계산
 - 주소 검색으로 집 설정
 - iOS 라이브 액티비티 (잠금화면)
 - 버스와 지하철 실시간 위치
