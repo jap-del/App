@@ -61,6 +61,10 @@ flutter analyze
 flutter test
 ```
 
+## 서버
+
+교통 API 인증키를 숨기기 위한 서버는 `server/` 폴더에 있습니다 (Cloudflare Workers). 배포 방법은 [server/README.md](server/README.md)를 보세요.
+
 ## 구조
 
 - `lib/logic/` 알림 시각 계산
