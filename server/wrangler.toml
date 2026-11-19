@@ -1,0 +1,13 @@
+# 막차 알림 앱의 API 서버 (Cloudflare Workers)
+name = "last-train-api"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# 요청 로그에 이용자 위치(좌표)가 남지 않도록 로그 수집을 끈다.
+[observability]
+enabled = false
+
+# 인증키는 이 파일에 쓰지 않는다. 아래 명령으로 Cloudflare에 따로 저장한다.
+#   npx wrangler secret put DATA_GO_KR_KEY
+#   npx wrangler secret put SEOUL_SUBWAY_KEY
+#   npx wrangler secret put ODSAY_KEY
