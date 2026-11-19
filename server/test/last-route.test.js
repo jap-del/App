@@ -362,7 +362,7 @@ describe('/last-route', () => {
     const body = await res.json();
     assert.equal(body.status, 404);
     assert.equal(body.body.reason, 'missed');
-    assert.ok(body.trace.some((line) => line.startsWith('경로 [수도권 9호선]')));
+    assert.ok(body.trace.some((line) => line.startsWith('#1 경로 [수도권 9호선]')));
     assert.ok(body.trace.some((line) => line.includes('방향 점수')));
     assert.ok(!JSON.stringify(body).includes('37.55'), '좌표는 기록에 넣지 않는다');
   });
