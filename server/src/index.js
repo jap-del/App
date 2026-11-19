@@ -321,16 +321,20 @@ function createData(env, origin) {
         upstream.searchParams.set('resultType', 'json');
         upstream.searchParams.set('serviceKey', env.DATA_GO_KR_KEY);
         const data = await getJson(upstream, 0);
-        const result = data?.ServiceResult;
-        const code = String(result?.msgHeader?.headerCd ?? '0');
-        if (code !== '0') {
-          this.log?.(`서울 버스 정류소 시각: ${result?.msgHeader?.headerMsg ?? code}`);
+        // JSON 응답은 XML과 달리 ServiceResult 없이 msgHeader, msgBody가 바로 올 수 있다.
+        const result = data?.ServiceResult ?? data;
+        const code = String(result?.msgHeader?.headerCd ?? '');
+        const list = result?.msgBody?.itemList;
+        const items = Array.isArray(list) ? list : list ? [list] : [];
+        const item = items.find((i) => String(i.busRouteId) === routeId) ?? (items.length === 1 ? items[0] : null);
+        const last = parseSeoulBusTime(item?.lastBusTm);
+        if (last != null) {
+          value = { first: parseSeoulBusTime(item.firstBusTm) ?? 0, last };
         } else {
-          const list = result?.msgBody?.itemList;
-          const items = Array.isArray(list) ? list : list ? [list] : [];
-          const item = items.find((i) => String(i.busRouteId) === routeId) ?? (items.length === 1 ? items[0] : null);
-          const last = parseSeoulBusTime(item?.lastBusTm);
-          if (last != null) value = { first: parseSeoulBusTime(item.firstBusTm) ?? 0, last };
+          // 원인을 찾을 수 있게 응답 모양만 남긴다 (키나 위치는 들어 있지 않다).
+          this.log?.(`서울 버스 정류소 응답: 코드 ${code || '없음'} ${result?.msgHeader?.headerMsg ?? ''}, 항목 ${items.length}개` +
+            (item ? `, 막차 값 "${item.lastBusTm}"` : '') +
+            (!result?.msgHeader ? `, 최상위 키 ${Object.keys(data ?? {}).join('/')}` : ''));
         }
       } catch (e) {
         this.log?.(`서울 버스 정류소 시각 오류: ${e?.message ?? e}`);
