@@ -500,6 +500,18 @@ describe('/last-route', () => {
     assert.equal(seoul.searchParams.get('busRouteId'), '100100063');
   });
 
+  it('서울 버스 JSON 응답이 ServiceResult 없이 와도 읽는다', async () => {
+    seoulBus = {
+      comMsgHeader: {},
+      msgHeader: { headerCd: '0', headerMsg: '정상적으로 처리되었습니다.' },
+      msgBody: { itemList: [{ busRouteId: '100100063', firstBusTm: '20261119040000', lastBusTm: '20261120001000' }] },
+    };
+    stub((url) => (url.pathname.endsWith('busLaneDetail') ? assert.fail('ODsay 노선 조회를 하면 안 된다') : { result: { path: [busPath] } }));
+    const res = await call(`${coords}&at=2026-11-19T18:00:00%2B09:00`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).estimated, false);
+  });
+
   it('서울 API를 아직 못 쓰면 ODsay 추정으로 넘어가고, 회차 뒤 정류장은 빼서 계산 못 함', async () => {
     const detail = {
       busLastTime: '24:05',
