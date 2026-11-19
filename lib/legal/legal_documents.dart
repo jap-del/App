@@ -14,4 +14,5 @@ const dataSources = [
   (name: '대중교통 길찾기, 버스 노선 정보', via: 'ODsay LAB (lab.odsay.com)'),
   (name: '국토교통부 (TAGO) 버스·지하철 정보', via: '공공데이터포털 (data.go.kr)'),
   (name: '서울시 지하철 실시간 정보', via: '서울 열린데이터광장 (data.seoul.go.kr)'),
+  (name: '지도', via: '© OpenStreetMap contributors (openstreetmap.org)'),
 ];
