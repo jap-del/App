@@ -3,6 +3,17 @@
 // 앱 대신 공공 교통 API를 불러주는 역할만 한다. 인증키는 Cloudflare
 // 비밀 값(env)으로만 보관하고, 이용자의 위치는 저장하거나 로그에 남기지 않는다.
 
+import {
+  TAGO_DAY_CODE,
+  findLastRoute,
+  normalizeStationName,
+  parseTagoSchedule,
+  pickStation,
+  serviceDay,
+  tagoItems,
+  toResponse,
+} from './last-route.js';
+
 const TAGO_BASE = 'https://apis.data.go.kr/1613000';
 const SEOUL_BASE = 'http://swopenapi.seoul.go.kr/api/subway';
 const ODSAY_BASE = 'https://api.odsay.com/v1/api';
@@ -55,6 +66,9 @@ export default {
       }
       if (parts[0] === 'odsay' && parts.length === 2) {
         return await odsay(parts[1], url.searchParams, env, url.origin);
+      }
+      if (parts.length === 1 && parts[0] === 'last-route') {
+        return await lastRoute(url.searchParams, env, url.origin);
       }
       return json({ error: '없는 주소입니다.' }, 404);
     } catch (e) {
@@ -127,6 +141,159 @@ async function odsay(api, params, env, origin) {
   }
   upstream.searchParams.set('apiKey', env.ODSAY_KEY);
   return forward(upstream, ODSAY_APIS[api], { referer: `${origin}/` });
+}
+
+/**
+ * 집까지 가는 오늘 막차. 앱의 BackendTransitService가 부른다.
+ * /last-route?fromLat=37.55&fromLng=126.97&toLat=37.49&toLng=127.02
+ * 확인용으로 at=2026-11-19T23:00:00+09:00 처럼 기준 시각을 줄 수 있다.
+ * 위치는 계산에만 쓰고 저장하거나 캐시하지 않는다.
+ */
+async function lastRoute(params, env, origin) {
+  const coords = ['fromLat', 'fromLng', 'toLat', 'toLng'].map((k) => Number(params.get(k)));
+  const [fromLat, fromLng, toLat, toLng] = coords;
+  if (coords.some((n) => !Number.isFinite(n)) || !inKorea(fromLat, fromLng) || !inKorea(toLat, toLng)) {
+    return json({ error: '출발지와 집 좌표가 필요합니다.' }, 400);
+  }
+  if (!env.ODSAY_KEY || !env.DATA_GO_KR_KEY) {
+    return json({ error: '서버에 교통 API 키가 없습니다.' }, 500);
+  }
+  const now = params.has('at') ? new Date(params.get('at')) : new Date();
+  if (Number.isNaN(now.getTime())) return json({ error: '시각 형식이 잘못됐습니다.' }, 400);
+
+  const day = serviceDay(now);
+  const data = createData(env, origin);
+  let paths;
+  try {
+    const result = await data.odsay('searchPubTransPathT', {
+      SX: fromLng, SY: fromLat, EX: toLng, EY: toLat,
+    });
+    paths = result.path ?? [];
+  } catch (e) {
+    if (e.code === '-98') {
+      return json({ error: '집이 아주 가까워요. 걸어서 갈 수 있어요.', reason: 'too-close' }, 404);
+    }
+    if (e.code === '-99') {
+      return json({ error: '집까지 가는 대중교통 경로가 없어요.', reason: 'no-route' }, 404);
+    }
+    throw e;
+  }
+  const found = await findLastRoute(paths, day, data);
+  if (found.status === 'ok') return json(toResponse(found.plan, day));
+  if (found.status === 'missed') {
+    return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed' }, 404);
+  }
+  return json({ error: '이 경로는 막차 시간을 계산하지 못했어요.', reason: 'unknown' }, 503);
+}
+
+function inKorea(lat, lng) {
+  return lat >= 33 && lat <= 39 && lng >= 124 && lng <= 132;
+}
+
+/** 한 요청에서 바깥 API를 부를 수 있는 횟수. Cloudflare 무료 요금제 한도(50) 안에서 쓴다. */
+const SUBREQUEST_BUDGET = 45;
+/** 한 요청에서 ODsay 버스 노선 정보를 부르는 횟수. ODsay 무료 한도가 하루 30건이라 아낀다. */
+const BUS_LOOKUP_BUDGET = 3;
+
+/** 요청 사이에 재사용하는 메모리 캐시 (Worker가 살아 있는 동안만 유지). 위치는 넣지 않는다. */
+const memory = new Map();
+const MEMORY_LIMIT = 500;
+
+function cached(key, ttlSeconds, load) {
+  const hit = memory.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value;
+  const value = load();
+  memory.set(key, { value, expires: Date.now() + ttlSeconds * 1000 });
+  if (memory.size > MEMORY_LIMIT) memory.delete(memory.keys().next().value);
+  Promise.resolve(value).catch(() => memory.delete(key));
+  return value;
+}
+
+export function clearMemoryCache() {
+  memory.clear();
+}
+
+class UpstreamError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/** 막차 계산에 필요한 데이터를 불러오는 함수 묶음. */
+function createData(env, origin) {
+  let subrequests = 0;
+  let busLookups = 0;
+
+  async function getJson(upstream, cacheSeconds, headers = {}) {
+    if (subrequests >= SUBREQUEST_BUDGET) throw new UpstreamError('budget', 'budget');
+    subrequests += 1;
+    const init = { headers };
+    if (cacheSeconds > 0) init.cf = { cacheTtl: cacheSeconds, cacheEverything: true };
+    const res = await fetch(upstream.toString(), init);
+    const body = await res.text();
+    if (!res.ok) throw new UpstreamError(`status ${res.status}`, String(res.status));
+    if (body.trimStart().startsWith('<')) throw new UpstreamError(xmlReason(body), 'xml');
+    const data = JSON.parse(body);
+    const err = odsayError(data);
+    if (err) throw new UpstreamError(err.message, err.code);
+    return data;
+  }
+
+  function tago(operation, query, cacheSeconds) {
+    const upstream = new URL(`${TAGO_BASE}/SubwayInfo/${operation}`);
+    for (const [k, v] of Object.entries(query)) upstream.searchParams.set(k, String(v));
+    upstream.searchParams.set('_type', 'json');
+    upstream.searchParams.set('serviceKey', env.DATA_GO_KR_KEY);
+    return getJson(upstream, cacheSeconds);
+  }
+
+  return {
+    async odsay(api, query) {
+      const upstream = new URL(`${ODSAY_BASE}/${api}`);
+      for (const [k, v] of Object.entries(query)) upstream.searchParams.set(k, String(v));
+      upstream.searchParams.set('apiKey', env.ODSAY_KEY);
+      const data = await getJson(upstream, ODSAY_APIS[api] ?? 0, { referer: `${origin}/` });
+      return data.result ?? {};
+    },
+
+    async findSubwayStation(name, lane) {
+      const keyword = normalizeStationName(name);
+      if (!keyword) return null;
+      const items = await cached(`station:${keyword}`, 24 * 60 * 60, async () =>
+        tagoItems(await tago('GetKwrdFndSubwaySttnList', { subwayStationName: keyword, numOfRows: 100 }, 24 * 60 * 60)));
+      return pickStation(items, name, lane);
+    },
+
+    subwaySchedule(stationId, dayType, dir) {
+      const ttl = 6 * 60 * 60;
+      return cached(`schedule:${stationId}:${dayType}:${dir}`, ttl, async () =>
+        parseTagoSchedule(tagoItems(await tago('GetSubwaySttnAcctoSchdulList', {
+          subwayStationId: stationId,
+          dailyTypeCode: TAGO_DAY_CODE[dayType],
+          upDownTypeCode: dir,
+          numOfRows: 500,
+          pageNo: 1,
+        }, ttl))));
+    },
+
+    busLane(busID) {
+      const key = `bus:${busID}`;
+      const hit = memory.get(key);
+      if (hit && hit.expires > Date.now()) return hit.value;
+      if (busLookups >= BUS_LOOKUP_BUDGET) return null;
+      busLookups += 1;
+      return cached(key, 24 * 60 * 60, () => this.odsay('busLaneDetail', { busID }));
+    },
+  };
+}
+
+/** ODsay 오류 객체({error: {...}} 또는 {error: [{...}]})에서 코드와 메시지를 꺼낸다. */
+function odsayError(data) {
+  if (!data || typeof data !== 'object' || !data.error) return null;
+  const err = Array.isArray(data.error) ? data.error[0] : data.error;
+  if (!err) return null;
+  return { code: String(err.code ?? ''), message: String(err.message ?? err.msg ?? '') };
 }
 
 async function forward(upstream, cacheSeconds, headers = {}) {
