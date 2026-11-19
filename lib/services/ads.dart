@@ -42,7 +42,8 @@ class _AdBannerState extends State<AdBanner> {
     _ad = BannerAd(
       size: AdSize.banner,
       adUnitId: Platform.isIOS ? _bannerIos : _bannerAndroid,
-      request: const AdRequest(),
+      // 맞춤형 광고는 별도 동의(iOS는 추적 허용)가 필요해서 일반 광고만 요청한다.
+      request: const AdRequest(nonPersonalizedAds: true),
       listener: BannerAdListener(
         onAdLoaded: (_) {
           if (mounted) setState(() => _loaded = true);

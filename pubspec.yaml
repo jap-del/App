@@ -65,6 +65,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # 개인정보처리방침과 위치기반서비스 이용약관. 웹(GitHub Pages)과 앱이 같은 파일을 쓴다.
+  assets:
+    - docs/privacy-policy.md
+    - docs/location-terms.md
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

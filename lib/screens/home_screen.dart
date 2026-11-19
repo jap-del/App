@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../legal/consent_store.dart';
 import '../logic/alert_planner.dart';
 import '../models/home_place.dart';
 import '../models/last_route.dart';
@@ -11,6 +12,7 @@ import '../services/notification_service.dart';
 import '../services/settings_store.dart';
 import '../services/transit_service.dart';
 import 'home_setup_screen.dart';
+import 'settings_screen.dart';
 
 /// 오늘의 막차 시간을 보여주는 첫 화면.
 class HomeScreen extends StatefulWidget {
@@ -19,6 +21,8 @@ class HomeScreen extends StatefulWidget {
     required this.transit,
     required this.settings,
     required this.locate,
+    required this.consent,
+    required this.onWithdrawn,
     this.notifications,
     this.adBanner,
   });
@@ -26,6 +30,10 @@ class HomeScreen extends StatefulWidget {
   final TransitService transit;
   final SettingsStore settings;
   final LocationProvider locate;
+  final ConsentStore consent;
+
+  /// 위치정보 동의를 철회한 뒤 동의 화면으로 돌아가게 한다.
+  final VoidCallback onWithdrawn;
 
   /// 테스트에서는 null로 두어 알림을 건너뛴다.
   final NotificationService? notifications;
@@ -79,6 +87,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final home = _home;
     if (home == null) {
       setState(() => _loading = false);
+      return;
+    }
+    if (await widget.consent.isLocationPaused()) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _route = null;
+        _error = '위치 사용이 일시 중지돼 있어요. 설정에서 다시 켤 수 있어요.';
+      });
+      await widget.notifications?.clear();
       return;
     }
     setState(() {
@@ -144,6 +162,22 @@ class _HomeScreenState extends State<HomeScreen> {
     await _refresh();
   }
 
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          consent: widget.consent,
+          onWithdrawn: () async {
+            await widget.notifications?.clear();
+            widget.onWithdrawn();
+          },
+        ),
+      ),
+    );
+    // 일시 중지 설정이 바뀌었을 수 있다.
+    if (mounted && _home != null) await _refresh();
+  }
+
   Future<void> _changeLead(int minutes) async {
     setState(() => _leadMinutes = minutes);
     await widget.settings.saveLeadMinutes(minutes);
@@ -162,6 +196,11 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: const Icon(Icons.refresh),
               tooltip: '새로고침',
             ),
+          IconButton(
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: '설정',
+          ),
         ],
       ),
       body: SafeArea(
