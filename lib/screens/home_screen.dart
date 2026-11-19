@@ -320,6 +320,22 @@ class _RouteCard extends StatelessWidget {
                   style: theme.textTheme.bodySmall,
                 ),
               ),
+            if (route.nightBus case final night?)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.nightlight_round, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '놓쳐도 심야버스 ${night.buses.join(', ')}번으로 '
+                        '${time.format(night.departBy)}까지 출발할 수 있어요',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             const Divider(height: 32),
             for (final leg in route.legs)
               Padding(
