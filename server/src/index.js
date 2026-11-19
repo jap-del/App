@@ -8,7 +8,7 @@ const SEOUL_BASE = 'http://swopenapi.seoul.go.kr/api/subway';
 
 /** 앱이 부를 수 있는 TAGO 서비스 목록. 이 밖의 요청은 막는다. */
 export const TAGO_SERVICES = new Set([
-  'SubwayInfoService', // 지하철역 검색, 역별 시간표
+  'SubwayInfo', // 지하철역 검색(GetKwrdFndSubwaySttnList), 역별 시간표(GetSubwaySttnAcctoSchdulList)
   'ArvlInfoInqireService', // 버스 도착 예정 정보
   'BusLcInfoInqireService', // 버스 위치 정보
   'BusSttnInfoInqireService', // 버스 정류소 정보
@@ -17,7 +17,7 @@ export const TAGO_SERVICES = new Set([
 
 /** 데이터가 자주 바뀌지 않는 서비스는 캐시해 호출 횟수를 아낀다 (초). */
 const CACHE_SECONDS = {
-  SubwayInfoService: 6 * 60 * 60,
+  SubwayInfo: 6 * 60 * 60,
   BusRouteInfoInqireService: 6 * 60 * 60,
   BusSttnInfoInqireService: 60 * 60,
 };
@@ -49,10 +49,11 @@ export default {
 
 /**
  * 공공데이터포털 TAGO API를 불러 응답을 그대로 돌려준다.
- * 예: /tago/SubwayInfoService/getKwrdFndSubwaySttnList?subwayStationName=서울역
+ * 예: /tago/SubwayInfo/GetKwrdFndSubwaySttnList?subwayStationName=서울역
+ * 지하철은 새 주소(SubwayInfo, 대문자 Get), 버스는 기존 주소(...InqireService, 소문자 get)를 쓴다.
  */
 async function tago(service, operation, params, env) {
-  if (!TAGO_SERVICES.has(service) || !/^get[A-Za-z]+$/.test(operation)) {
+  if (!TAGO_SERVICES.has(service) || !/^[Gg]et[A-Za-z]+$/.test(operation)) {
     return json({ error: '지원하지 않는 서비스입니다.' }, 404);
   }
   if (!env.DATA_GO_KR_KEY) {

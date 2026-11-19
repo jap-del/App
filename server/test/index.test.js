@@ -31,11 +31,11 @@ afterEach(() => {
 describe('TAGO 프록시', () => {
   it('인증키와 JSON 형식을 붙여 공공데이터포털을 부른다', async () => {
     const upstream = mockUpstream('{"response":{"body":{}}}');
-    const res = await call('/tago/SubwayInfoService/getKwrdFndSubwaySttnList?subwayStationName=서울역');
+    const res = await call('/tago/SubwayInfo/GetKwrdFndSubwaySttnList?subwayStationName=서울역');
 
     assert.equal(res.status, 200);
     const called = new URL(upstream[0]);
-    assert.equal(called.origin + called.pathname, 'https://apis.data.go.kr/1613000/SubwayInfoService/getKwrdFndSubwaySttnList');
+    assert.equal(called.origin + called.pathname, 'https://apis.data.go.kr/1613000/SubwayInfo/GetKwrdFndSubwaySttnList');
     assert.equal(called.searchParams.get('serviceKey'), 'test+key/==');
     assert.equal(called.searchParams.get('_type'), 'json');
     assert.equal(called.searchParams.get('subwayStationName'), '서울역');
@@ -43,7 +43,7 @@ describe('TAGO 프록시', () => {
 
   it('앱이 보낸 serviceKey는 무시하고 서버의 키를 쓴다', async () => {
     const upstream = mockUpstream('{}');
-    await call('/tago/SubwayInfoService/getKwrdFndSubwaySttnList?serviceKey=hacked');
+    await call('/tago/SubwayInfo/GetKwrdFndSubwaySttnList?serviceKey=hacked');
     const called = new URL(upstream[0]);
     assert.deepEqual(called.searchParams.getAll('serviceKey'), ['test+key/==']);
   });
@@ -59,14 +59,14 @@ describe('TAGO 프록시', () => {
     mockUpstream(
       '<OpenAPI_ServiceResponse><cmmMsgHeader><returnAuthMsg>SERVICE_KEY_IS_NOT_REGISTERED_ERROR</returnAuthMsg></cmmMsgHeader></OpenAPI_ServiceResponse>',
     );
-    const res = await call('/tago/SubwayInfoService/getKwrdFndSubwaySttnList');
+    const res = await call('/tago/SubwayInfo/GetKwrdFndSubwaySttnList');
     assert.equal(res.status, 502);
     assert.equal((await res.json()).detail, 'SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
   });
 
   it('키가 설정되지 않았으면 알려준다', async () => {
     mockUpstream('{}');
-    const res = await call('/tago/SubwayInfoService/getKwrdFndSubwaySttnList', {});
+    const res = await call('/tago/SubwayInfo/GetKwrdFndSubwaySttnList', {});
     assert.equal(res.status, 500);
   });
 });

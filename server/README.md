@@ -42,7 +42,7 @@
 
 - `https://last-train-api.○○○.workers.dev/health`
 - `https://last-train-api.○○○.workers.dev/seoul/arrivals?station=강남`
-- `https://last-train-api.○○○.workers.dev/tago/SubwayInfoService/getKwrdFndSubwaySttnList?subwayStationName=서울역`
+- `https://last-train-api.○○○.workers.dev/tago/SubwayInfo/GetKwrdFndSubwaySttnList?subwayStationName=서울역`
 
 ## 주소 목록
 
