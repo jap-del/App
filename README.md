@@ -8,7 +8,8 @@
 - 막차 시간과 남은 시간 표시
 - 출발 알림 예약 (5분 전부터 30분 전까지 선택)
 - Android 잠금화면 고정 알림
-- 홈 화면 아래 배너 광고 (AdMob 비맞춤형, 지금은 테스트 광고)
+- 홈 화면 아래 배너 광고, 지도 화면을 닫을 때 전면 영상 광고 (AdMob 비맞춤형, 지금은 테스트 광고)
+- 설정의 광고 제거: 인앱 결제(영구), 보상형 영상 광고 시청(24시간), 구매 복원
 - 첫 실행 동의 화면 (만 14세 이상, 위치기반서비스 이용약관, 접근권한 안내)
 - 설정: 위치 사용 일시 중지, 동의 철회, 개인정보처리방침, 이용약관, 데이터 출처, 오픈소스 라이선스
 
@@ -37,6 +38,18 @@ ODsay 무료 요금제는 하루 30번까지라서, 앱은 같은 자리에서 1
 
 - 앱 ID: `android/app/src/main/AndroidManifest.xml`의 `APPLICATION_ID`, `ios/Runner/Info.plist`의 `GADApplicationIdentifier`
 - 배너 광고 단위 ID: 빌드할 때 `--dart-define=AD_BANNER_ANDROID=...` 와 `--dart-define=AD_BANNER_IOS=...`
+- 전면 영상 광고: `AD_INTERSTITIAL_ANDROID`, `AD_INTERSTITIAL_IOS`
+- 보상형 영상 광고: `AD_REWARDED_ANDROID`, `AD_REWARDED_IOS`
+
+전면 영상 광고는 지도 화면을 닫을 때만, 30분에 한 번까지, 출발 30분 전부터는 띄우지 않습니다 (`lib/services/ad_free.dart`의 `shouldShowInterstitial`).
+
+### 광고 제거 결제
+
+Google Play Console과 App Store Connect에 상품 ID `remove_ads`로 **비소모성** 인앱 상품을 만들면 설정 화면에 가격이 나옵니다. 구매 기록은 기기에 저장하고, 재설치하면 "구매 복원"으로 되살립니다. 지금은 영수증을 서버에서 검증하지 않습니다.
+
+### 출시 전 확인 (ODsay 약관)
+
+ODsay 이용약관 제6조는 API를 비상업적 목적으로만 쓰고, 광고와 같은 화면에 붙여 두지 말라고 합니다. 유료 요금제에서 광고가 있는 앱이 허용되는지 ODsay에 서면으로 확인한 뒤 출시합니다. 안 된다고 하면 막차 화면의 배너를 경로 결과가 없는 화면으로 옮깁니다.
 
 개발 중에는 반드시 테스트 ID를 쓰세요. 실제 광고를 직접 누르면 AdMob 계정이 정지될 수 있습니다.
 

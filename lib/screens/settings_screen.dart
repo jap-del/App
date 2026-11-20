@@ -10,9 +10,13 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.consent,
     required this.onWithdrawn,
+    this.adFreeSection,
   });
 
   final ConsentStore consent;
+
+  /// 광고 제거 메뉴. 테스트에서는 null.
+  final Widget? adFreeSection;
 
   /// 동의를 철회한 뒤 호출된다. 알림 정리와 첫 화면 이동을 맡는다.
   final Future<void> Function() onWithdrawn;
@@ -108,6 +112,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: _paused == null ? null : _setPaused,
           ),
           const Divider(),
+          if (widget.adFreeSection case final section?) ...[
+            section,
+            const Divider(),
+          ],
           ListTile(
             title: const Text('개인정보처리방침'),
             onTap: () => _open(LegalDocument.privacyPolicy),

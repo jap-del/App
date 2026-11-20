@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
 import 'legal/consent_store.dart';
+import 'screens/ad_free_section.dart';
 import 'screens/consent_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/ad_free.dart';
 import 'services/ads.dart';
 import 'services/location_service.dart';
 import 'services/notification_service.dart';
+import 'services/purchases.dart';
 import 'services/settings_store.dart';
 import 'services/transit_service.dart';
 
@@ -14,6 +19,12 @@ Future<void> main() async {
   final notifications = NotificationService();
   await notifications.init();
   await initAds();
+  final adFree = AdFreeState();
+  await adFree.load();
+  final videoAds = VideoAds(adFree)..preload();
+  final purchases = PurchaseService(adFree);
+  // 스토어 연결이 늦어도 첫 화면은 바로 띄운다.
+  unawaited(purchases.init());
   runApp(
     LastTrainApp(
       home: AppGate(
@@ -25,7 +36,16 @@ Future<void> main() async {
           consent: consent,
           onWithdrawn: onWithdrawn,
           notifications: notifications,
-          adBanner: const AdBanner(),
+          adBanner: AdBanner(adFree: adFree),
+          afterMapClosed: (departBy) =>
+              videoAds.maybeShowInterstitial(departBy: departBy),
+          adFreeSection: AdFreeSection(
+            adFree: adFree,
+            price: () => purchases.price,
+            onBuy: purchases.buyRemoveAds,
+            onRestore: purchases.restore,
+            onWatchReward: videoAds.showRewarded,
+          ),
         ),
       ),
     ),
