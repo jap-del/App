@@ -53,7 +53,8 @@
 | 주소 | 내용 |
 | --- | --- |
 | `/health` | 서버 상태 |
-| `/last-route?fromLat=&fromLng=&toLat=&toLng=` | 집까지 오늘 막차 출발 시각과 경로 (앱이 부르는 주소) |
+| `/last-route?fromLat=&fromLng=&toLat=&toLng=` | 집까지 오늘 막차 출발 시각과 경로 (앱이 부르는 주소). 응답의 `savedPaths`는 앱이 기기에 저장해 둔다 |
+| `POST /last-route` (본문 `{"paths": savedPaths}`) | 저장해 둔 경로로 오늘 막차 계산. 좌표를 받지 않고 길찾기(ODsay)를 부르지 않는다 |
 | `/seoul/arrivals?station=역이름` | 서울 지하철 역별 실시간 도착정보 |
 | `/seoul/positions?line=2호선` | 서울 지하철 노선별 실시간 열차 위치 |
 | `/tago/{서비스}/{기능}?...` | 공공데이터포털 TAGO API (지하철 시간표, 버스 도착·위치·정류소·노선) |

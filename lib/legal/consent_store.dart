@@ -1,7 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 약관이 바뀌어 다시 동의를 받아야 할 때 올린다.
-const currentConsentVersion = 1;
+const currentConsentVersion = 2;
 
 /// 이용자의 동의 기록과 위치 사용 일시 중지 상태를 기기에 저장한다.
 class ConsentStore {

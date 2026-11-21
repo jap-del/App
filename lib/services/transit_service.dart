@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/home_place.dart';
 import '../models/last_route.dart';
+import 'saved_route_store.dart';
 
 /// 현재 위치에서 집까지 가는 마지막 경로를 알려주는 서비스.
 abstract class TransitService {
@@ -24,12 +25,18 @@ class BackendTransitService implements TransitService {
     this.baseUrl, {
     http.Client? client,
     DateTime Function()? now,
+    this.saved,
   }) : _client = client ?? http.Client(),
        _now = now ?? DateTime.now;
 
   final String baseUrl;
   final http.Client _client;
   final DateTime Function() _now;
+
+  /// 찾은 경로를 기기에 저장해 두고, 같은 곳에서 다시 물으면 길찾기 없이 계산한다.
+  final SavedRouteStore? saved;
+
+  static const _timeout = Duration(seconds: 25);
 
   /// 길찾기 API는 호출 수가 제한돼 있어서, 거의 같은 자리에서 다시 물으면
   /// 잠시 전 결과를 다시 쓴다.
@@ -60,6 +67,62 @@ class BackendTransitService implements TransitService {
       return _cached;
     }
 
+    final route =
+        await _fromSaved(fromLat, fromLng, home) ??
+        await _search(fromLat, fromLng, home);
+    _cacheKey = key;
+    _cachedAt = now;
+    _cached = route.value;
+    return route.value;
+  }
+
+  /// 저장한 경로가 있으면 좌표 없이 경로만 보내 계산한다 (길찾기 호출 없음).
+  /// 저장한 경로가 없거나 이 방법으로 답을 못 얻으면 null.
+  Future<({LastRoute? value})?> _fromSaved(
+    double fromLat,
+    double fromLng,
+    HomePlace home,
+  ) async {
+    final store = saved;
+    if (store == null) return null;
+    final paths = await store.find(
+      fromLat: fromLat,
+      fromLng: fromLng,
+      home: home,
+    );
+    if (paths == null) return null;
+    final http.Response response;
+    try {
+      response = await _client
+          .post(
+            Uri.parse('$baseUrl/last-route'),
+            headers: {'content-type': 'application/json'},
+            body: jsonEncode({'paths': paths}),
+          )
+          .timeout(_timeout);
+    } on Object {
+      return null;
+    }
+    final body = _decode(response);
+    if (response.statusCode == 200 && body != null) {
+      return (value: LastRoute.fromJson(body));
+    }
+    if (response.statusCode == 404 && body?['reason'] == 'missed') {
+      return (value: null);
+    }
+    // 저장한 경로로 계산하지 못했으면(노선 변경 등) 지우고 새로 찾는다.
+    if (response.statusCode == 400 || response.statusCode == 503) {
+      await store.remove(fromLat: fromLat, fromLng: fromLng, home: home);
+    }
+    return null;
+  }
+
+  /// 길찾기부터 새로 해서 계산하고, 서버가 준 경로를 저장해 둔다.
+  Future<({LastRoute? value})> _search(
+    double fromLat,
+    double fromLng,
+    HomePlace home,
+  ) async {
     final uri = Uri.parse('$baseUrl/last-route').replace(
       queryParameters: {
         'fromLat': '$fromLat',
@@ -68,9 +131,7 @@ class BackendTransitService implements TransitService {
         'toLng': '${home.lng}',
       },
     );
-    final response = await _client
-        .get(uri)
-        .timeout(const Duration(seconds: 25));
+    final response = await _client.get(uri).timeout(_timeout);
     final body = _decode(response);
     LastRoute? route;
     if (response.statusCode == 200 && body != null) {
@@ -84,10 +145,16 @@ class BackendTransitService implements TransitService {
             '막차 정보를 가져오지 못했어요 (${response.statusCode})',
       );
     }
-    _cacheKey = key;
-    _cachedAt = now;
-    _cached = route;
-    return route;
+    final paths = body?['savedPaths'];
+    if (saved != null && paths is List && paths.isNotEmpty) {
+      await saved!.save(
+        fromLat: fromLat,
+        fromLng: fromLng,
+        home: home,
+        paths: paths,
+      );
+    }
+    return (value: route);
   }
 
   static Map<String, dynamic>? _decode(http.Response response) {
@@ -144,5 +211,5 @@ TransitService createTransitService() {
   );
   return baseUrl == 'sample'
       ? SampleTransitService()
-      : BackendTransitService(baseUrl);
+      : BackendTransitService(baseUrl, saved: SavedRouteStore());
 }

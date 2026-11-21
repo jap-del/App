@@ -26,6 +26,8 @@ class HomeScreen extends StatefulWidget {
     required this.onWithdrawn,
     this.notifications,
     this.adBanner,
+    this.afterMapClosed,
+    this.adFreeSection,
   });
 
   final TransitService transit;
@@ -41,6 +43,12 @@ class HomeScreen extends StatefulWidget {
 
   /// 화면 아래에 붙는 광고. 테스트에서는 null로 두어 광고를 뺀다.
   final Widget? adBanner;
+
+  /// 지도 화면을 닫은 뒤 불린다 (전면 영상 광고 자리). 인자는 출발 시각.
+  final Future<void> Function(DateTime departBy)? afterMapClosed;
+
+  /// 설정 화면에 넣을 광고 제거 메뉴. 테스트에서는 null.
+  final Widget? adFreeSection;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -180,6 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
           consent: widget.consent,
+          adFreeSection: widget.adFreeSection,
           onWithdrawn: () async {
             await widget.notifications?.clear();
             widget.onWithdrawn();
@@ -200,10 +209,10 @@ class _HomeScreenState extends State<HomeScreen> {
     await _updateNotifications();
   }
 
-  void _showMap(LastRoute route) {
+  Future<void> _showMap(LastRoute route) async {
     final home = _home;
     if (home == null) return;
-    Navigator.of(context).push(
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => RouteMapScreen(
           route: route,
@@ -213,6 +222,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
+    await widget.afterMapClosed?.call(route.departBy);
   }
 
   Future<void> _changeLead(int minutes) async {
