@@ -5,6 +5,7 @@
 
 import {
   TAGO_DAY_CODE,
+  compactPaths,
   findLastRoute,
   planPaths,
   normalizeStationName,
@@ -14,6 +15,7 @@ import {
   serviceDay,
   tagoItems,
   toResponse,
+  validSavedPaths,
 } from './last-route.js';
 
 const TAGO_BASE = 'https://apis.data.go.kr/1613000';
@@ -52,11 +54,19 @@ const CACHE_SECONDS = {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const isLastRoute = parts.length === 1 && parts[0] === 'last-route';
+    if (request.method === 'POST' && isLastRoute) {
+      try {
+        return await savedLastRoute(request, url.searchParams, env, url.origin);
+      } catch (e) {
+        return json({ error: '교통 정보를 가져오지 못했습니다.' }, 502);
+      }
+    }
     if (request.method !== 'GET') {
       return json({ error: 'GET 요청만 받습니다.' }, 405);
     }
-    const url = new URL(request.url);
-    const parts = url.pathname.split('/').filter(Boolean);
     try {
       if (parts.length === 1 && parts[0] === 'health') {
         return json({ ok: true });
@@ -70,7 +80,7 @@ export default {
       if (parts[0] === 'odsay' && parts.length === 2) {
         return await odsay(parts[1], url.searchParams, env, url.origin);
       }
-      if (parts.length === 1 && parts[0] === 'last-route') {
+      if (isLastRoute) {
         return await lastRoute(url.searchParams, env, url.origin);
       }
       return json({ error: '없는 주소입니다.' }, 404);
@@ -153,19 +163,47 @@ async function odsay(api, params, env, origin) {
  * 위치는 계산에만 쓰고 저장하거나 캐시하지 않는다.
  */
 async function lastRoute(params, env, origin) {
-  if (params.get('debug') === '1') return lastRouteDebug(params, env, origin);
-  return lastRouteResponse(params, env, origin);
+  const run = (log) => lastRouteResponse(params, env, origin, log);
+  return params.get('debug') === '1' ? withTrace(run) : run();
+}
+
+/** 앱이 저장해 둔 길찾기 결과로 계산할 때 받는 본문 크기 상한. */
+const SAVED_BODY_LIMIT = 256 * 1024;
+
+/**
+ * 앱이 기기에 저장해 둔 경로로 오늘 막차를 계산한다 (POST /last-route).
+ * 본문: { paths: [GET 응답의 savedPaths 그대로] }. 좌표는 받지 않고, 길찾기(ODsay)도 부르지 않는다.
+ * 확인용 at, debug는 GET처럼 주소에 붙인다.
+ */
+async function savedLastRoute(request, params, env, origin) {
+  const text = await request.text();
+  if (text.length > SAVED_BODY_LIMIT) return json({ error: '저장된 경로가 너무 큽니다.' }, 413);
+  let paths;
+  try {
+    paths = JSON.parse(text)?.paths;
+  } catch {
+    paths = null;
+  }
+  if (!validSavedPaths(paths)) return json({ error: '저장된 경로 형식이 잘못됐습니다.', reason: 'bad-saved' }, 400);
+  if (!env.DATA_GO_KR_KEY) return json({ error: '서버에 교통 API 키가 없습니다.' }, 500);
+  const now = params.has('at') ? new Date(params.get('at')) : new Date();
+  if (Number.isNaN(now.getTime())) return json({ error: '시각 형식이 잘못됐습니다.' }, 400);
+  const run = (log) => {
+    log?.('저장된 경로로 계산 (길찾기 생략)');
+    return planResponse(paths, now, env, origin, log);
+  };
+  return params.get('debug') === '1' ? withTrace(run) : run();
 }
 
 /**
  * 개발용: 계산 과정을 함께 보여주고 항상 200으로 답한다 (확인 도구가 오류 응답 본문을 못 읽어서).
  * 좌표와 키는 기록에 넣지 않는다.
  */
-async function lastRouteDebug(params, env, origin) {
+async function withTrace(run) {
   const trace = [];
   let res;
   try {
-    res = await lastRouteResponse(params, env, origin, (line) => trace.push(line));
+    res = await run((line) => trace.push(line));
   } catch (e) {
     return json({ status: 500, error: String(e?.message ?? e), trace });
   }
@@ -184,12 +222,9 @@ async function lastRouteResponse(params, env, origin, log) {
   const now = params.has('at') ? new Date(params.get('at')) : new Date();
   if (Number.isNaN(now.getTime())) return json({ error: '시각 형식이 잘못됐습니다.' }, 400);
 
-  const day = serviceDay(now);
-  const data = createData(env, origin);
-  if (log) data.log = log;
-  log?.(`운행일 ${day.date} ${day.dayType}, 지금 ${Math.floor(day.nowMin / 60)}시 ${Math.floor(day.nowMin % 60)}분`);
   let paths;
   try {
+    const data = createData(env, origin);
     const result = await data.odsay('searchPubTransPathT', {
       SX: fromLng, SY: fromLat, EX: toLng, EY: toLat,
     });
@@ -204,6 +239,16 @@ async function lastRouteResponse(params, env, origin, log) {
     }
     throw e;
   }
+  // 앱이 저장해 두었다가 다음에 POST로 보내면 길찾기를 다시 부르지 않아도 된다.
+  return planResponse(paths, now, env, origin, log, { savedPaths: compactPaths(paths) });
+}
+
+/** 길찾기 경로들로 오늘 막차를 계산해 앱 형식으로 답한다. extra는 응답에 덧붙일 값. */
+async function planResponse(paths, now, env, origin, log, extra = {}) {
+  const day = serviceDay(now);
+  const data = createData(env, origin);
+  if (log) data.log = log;
+  log?.(`운행일 ${day.date} ${day.dayType}, 지금 ${Math.floor(day.nowMin / 60)}시 ${Math.floor(day.nowMin % 60)}분`);
   // 종류마다 같은 서버의 계산 진입점(Planner)에 맡겨 호출 한도를 따로 받는다.
   const planKind = env.PLANNER
     ? async (kind, kindPaths) => {
@@ -216,9 +261,9 @@ async function lastRouteResponse(params, env, origin, log) {
   log?.(planKind ? '종류별로 나눠 계산' : '한 번에 계산');
   const found = await findLastRoute(paths, day, data, planKind);
   log?.(`바깥 API 호출 ${data.subrequests()}번`);
-  if (found.status === 'ok') return json(toResponse(found.plan, day, found.later, found.kinds));
+  if (found.status === 'ok') return json({ ...toResponse(found.plan, day, found.later, found.kinds), ...extra });
   if (found.status === 'missed') {
-    return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed' }, 404);
+    return json({ error: '오늘 집에 가는 막차가 이미 끊겼어요.', reason: 'missed', ...extra }, 404);
   }
   return json({ error: '이 경로는 막차 시간을 계산하지 못했어요.', reason: 'unknown' }, 503);
 }

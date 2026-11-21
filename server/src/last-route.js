@@ -767,3 +767,30 @@ function legsJson(legs, day) {
     ...(arriveMin != null ? { arriveAt: toIso(day, arriveMin) } : {}),
   }));
 }
+
+/** 앱이 저장해 둘 수 있는 경로 수의 상한 (종류별로 살펴보는 경로 수의 합). */
+export const MAX_SAVED_PATHS = MAX_SUBWAY_PATHS + MAX_BUS_PATHS + MAX_MIXED_PATHS;
+
+/**
+ * 길찾기 결과에서 막차 계산에 쓰는 부분만 남긴다. 앱이 이것을 기기에 저장했다가
+ * 같은 곳에서 다시 물을 때 보내면, 길찾기(ODsay)를 다시 부르지 않고 시간표로만 계산한다.
+ * 걷는 구간에는 시간과 거리만 남겨 이용자 위치가 들어가지 않게 한다.
+ */
+export function compactPaths(paths) {
+  const groups = groupPaths(paths ?? []);
+  return [...groups.subway, ...groups.bus, ...groups.mixed].map((path) => ({
+    pathType: path.pathType,
+    subPath: (path.subPath ?? []).map((sp) => (sp.trafficType === 3
+      ? { trafficType: 3, sectionTime: sp.sectionTime ?? 0, distance: sp.distance ?? 0 }
+      : sp)),
+  }));
+}
+
+/** 앱이 보낸 저장 경로가 막차 계산에 쓸 수 있는 모양인지 본다. */
+export function validSavedPaths(paths) {
+  return Array.isArray(paths) &&
+    paths.length > 0 &&
+    paths.length <= MAX_SAVED_PATHS &&
+    paths.every((p) => p && typeof p === 'object' && Array.isArray(p.subPath) && p.subPath.length > 0 &&
+      p.subPath.length <= 12 && p.subPath.every((sp) => sp && [1, 2, 3].includes(sp.trafficType)));
+}

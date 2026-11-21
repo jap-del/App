@@ -22,6 +22,9 @@ import {
   legPath,
   estimatedCalls,
   planPaths,
+  compactPaths,
+  validSavedPaths,
+  MAX_SAVED_PATHS,
 } from '../src/last-route.js';
 
 /** 운행일 기준 분 → TAGO "HHMMSS". */
@@ -756,5 +759,73 @@ describe('/last-route', () => {
     const res = await call(`${coords}&at=2026-11-20T01:30:00%2B09:00`);
     assert.equal(res.status, 404);
     assert.equal((await res.json()).reason, 'missed');
+  });
+  function post(paths, query = 'at=2026-11-19T18:00:00%2B09:00') {
+    return worker.fetch(new Request(`https://api.example.com/last-route?${query}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    }), env);
+  }
+
+  it('저장해 둘 경로(savedPaths)를 함께 돌려준다', async () => {
+    stub({ result: { path: [{ pathType: 1, info: { totalTime: 30 }, subPath: [{ trafficType: 3, sectionTime: 5, distance: 300, startX: 126.97, startY: 37.55 }, subwayLeg] }] } });
+    const body = await (await call(`${coords}&at=2026-11-19T18:00:00%2B09:00`)).json();
+    assert.equal(body.savedPaths.length, 1);
+    assert.equal(body.savedPaths[0].info, undefined);
+    assert.deepEqual(body.savedPaths[0].subPath[0], { trafficType: 3, sectionTime: 5, distance: 300 });
+    assert.ok(!JSON.stringify(body.savedPaths).includes('37.55'), '이용자 좌표는 넣지 않는다');
+  });
+
+  it('막차가 끊겼어도 savedPaths를 돌려준다', async () => {
+    stub({ result: { path: [{ pathType: 1, subPath: [subwayLeg] }] } });
+    const body = await (await call(`${coords}&at=2026-11-20T01:30:00%2B09:00`)).json();
+    assert.equal(body.reason, 'missed');
+    assert.equal(body.savedPaths.length, 1);
+  });
+
+  it('저장된 경로를 POST로 보내면 길찾기 없이 같은 막차를 계산한다', async () => {
+    stub({ result: { path: [{ pathType: 1, subPath: [{ trafficType: 3, sectionTime: 5 }, subwayLeg] }] } });
+    const first = await (await call(`${coords}&at=2026-11-19T18:00:00%2B09:00`)).json();
+    clearMemoryCache();
+    calls = [];
+    const res = await post(first.savedPaths);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.departBy, first.departBy);
+    assert.equal(body.savedPaths, undefined);
+    assert.equal(calls.filter((c) => c.url.hostname === 'api.odsay.com').length, 0, 'ODsay를 부르지 않는다');
+    assert.ok(calls.length > 0, '시간표는 다시 불러온다');
+  });
+
+  it('POST도 debug=1이면 계산 과정을 보여준다', async () => {
+    stub({});
+    const res = await post(compactPaths([{ pathType: 1, subPath: [subwayLeg] }]), 'at=2026-11-19T18:00:00%2B09:00&debug=1');
+    const body = await res.json();
+    assert.equal(body.status, 200);
+    assert.ok(body.trace.includes('저장된 경로로 계산 (길찾기 생략)'));
+  });
+
+  it('형식이 잘못된 저장 경로는 400 bad-saved', async () => {
+    stub({});
+    for (const paths of [null, [], [{ subPath: [] }], [{ subPath: [{ trafficType: 9 }] }]]) {
+      const res = await post(paths);
+      assert.equal(res.status, 400);
+      assert.equal((await res.json()).reason, 'bad-saved');
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe('저장 경로', () => {
+  it('종류별로 살펴보는 경로만 남긴다', () => {
+    const paths = Array.from({ length: 20 }, () => ({ pathType: 2, subPath: [{ trafficType: 2, lane: [] }] }));
+    assert.equal(compactPaths(paths).length, 6);
+    assert.ok(validSavedPaths(compactPaths(paths)));
+  });
+
+  it('너무 많은 경로는 받지 않는다', () => {
+    const paths = Array.from({ length: MAX_SAVED_PATHS + 1 }, () => ({ pathType: 1, subPath: [{ trafficType: 1 }] }));
+    assert.equal(validSavedPaths(paths), false);
   });
 });

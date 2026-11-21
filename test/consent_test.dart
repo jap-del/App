@@ -51,6 +51,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('위치기반서비스 이용약관'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('제5조 (이용자의 권리)'), 200);
     expect(find.text('제5조 (이용자의 권리)'), findsOneWidget);
   });
 
